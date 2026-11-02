@@ -1,0 +1,33 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        patterns:
+          - "*"
+    # wasm-bindgen must match the wasm-bindgen-cli version in the workflows
+    # and scripts/build.sh.
+    ignore:
+      - dependency-name: wasm-bindgen
+
+  # The app uses pnpm. Dependabot reads app/pnpm-lock.yaml.
+  - package-ecosystem: npm
+    directory: /app
+    schedule:
+      interval: weekly
+    groups:
+      npm:
+        patterns:
+          - "*"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"
