@@ -58,7 +58,7 @@ async function pair(page: Page) {
   await page.goto("./");
   await expect(page.getByRole("tab", { name: "Setup", exact: true })).toHaveAttribute("aria-selected", "true");
   await page.getByRole("button", { name: "Paste a code", exact: true }).click();
-  await page.getByLabel("Pairing code or feed ticket", { exact: true }).fill(code);
+  await page.getByLabel("Pairing code, machine code, or feed ticket", { exact: true }).fill(code);
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   await expect(page.getByText(/Work laptop ·/)).toBeVisible();
   await page.getByRole("button", { name: "Request pairing", exact: true }).click();
@@ -153,4 +153,64 @@ test("entries that an older page saved move to IndexedDB", async ({ page }) => {
   const saved = JSON.parse(await page.evaluate(() => localStorage.getItem("yappr.readers") ?? "{}"));
   expect(saved.writers[writer].entries).toBeUndefined();
   expect(saved.writers[writer].last_id).toBe(3);
+});
+
+test("a CI job with its own key delivers and asks, and each run keeps its entries", async ({ page }) => {
+  await pair(page);
+  // On the laptop: a key for the job, and the address of this page.
+  const key = JSON.parse((await cli("key", "--name", "CI deploys", "--for", "my-browser", "--output", "json")).stdout);
+  await page.getByRole("tab", { name: "Setup", exact: true }).click();
+  await page.getByRole("button", { name: "Paste a code", exact: true }).click();
+  await page.getByLabel("Pairing code, machine code, or feed ticket", { exact: true }).fill(key.machine_code);
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(page.getByText(/CI deploys ·/)).toBeVisible();
+  await page.getByRole("button", { name: "Allow machine", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Pause CI deploys", exact: true })).toBeVisible();
+  await expect(page.getByLabel("Connected machines").getByText("Waiting for deliveries")).toBeVisible();
+  await page.getByRole("tab", { name: "Feed", exact: true }).click();
+
+  // Each CI run starts with an empty feed directory and the same key.
+  async function run(...args: string[]) {
+    const ci = await mkdtemp(resolve(tmpdir(), "yappr-ci-run-"));
+    const job = (...a: string[]) => execute(binary, ["--dir", ci, ...a], { env: { ...env(), YAPPR_KEY: key.private_key }, timeout: 60_000 });
+    await job("allow", key.device.address, "--alias", "phone", "--receives");
+    return job(...args);
+  }
+  await run("post", "--title", "Build 1 passed", "--body", "run 1");
+  await expect(page.getByRole("button", { name: "Build 1 passed. Show full text and details", exact: true })).toBeVisible();
+  const asking = run("approve", "phone", "Deploy build 2?");
+  await page.getByRole("button", { name: "Deploy build 2?. Show full text and details", exact: true }).waitFor();
+  await page.getByRole("button", { name: "Approve", exact: true }).click();
+  await asking;
+  await expect(page.getByText(/· confirmed/)).toBeVisible();
+  // The first run's entry stays after the second run.
+  await expect(page.getByRole("button", { name: "Build 1 passed. Show full text and details", exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Build 1 passed. Show full text and details", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Deploy build 2?. Show full text and details", exact: true })).toBeVisible();
+});
+
+test("entries in the first IndexedDB layout stay after the upgrade", async ({ page }) => {
+  const ticket = (await cli("ticket")).stdout.trim();
+  const writer = (await cli("id")).stdout.trim();
+  const log = "2026-11-01T10:00:00Z";
+  const entry = { v: 1, id: 1, time: log, source: "old", kind: "event", title: "Saved before logs", body: "b" };
+  const book = { writers: { [writer]: { ticket, name: "Old laptop", last_id: 1, log, enabled: false } }, selected: null, invitation: null };
+  await page.addInitScript(async ({ book, writer, entry }) => {
+    if (localStorage.getItem("yappr.readers")) return;
+    localStorage.setItem("yappr.readers", book);
+    // The layout of version 1: the key is [machine, entry id].
+    await new Promise<void>((done) => {
+      const open = indexedDB.open("yappr", 1);
+      open.onupgradeneeded = () => {
+        const store = open.result.createObjectStore("entries", { keyPath: ["writer", "id"] });
+        store.createIndex("order", ["ms", "writer", "id"]);
+        store.put({ writer, id: 1, ms: Date.parse(entry.time), entry });
+      };
+      open.onsuccess = () => { open.result.close(); done(); };
+    });
+  }, { book: JSON.stringify(book), writer, entry });
+  await page.goto("./");
+  await page.getByRole("tab", { name: "Feed", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Saved before logs. Show full text and details", exact: true })).toBeVisible();
 });
