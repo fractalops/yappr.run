@@ -1,0 +1,24 @@
+[package]
+name = "yappr-browser"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+anyhow = "1"
+console_error_panic_hook = "0.1"
+data-encoding = "2"
+iroh = { version = "1", default-features = false, features = ["tls-ring"] }
+jiff = { version = "0.2", features = ["js"] }
+js-sys = "0.3"
+n0-future = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", default-features = false, features = ["macros", "sync"] }
+wasm-bindgen = "=0.2.129"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["console", "Storage", "Window"] }
+yappr = { git = "https://github.com/fractalops/yappr", rev = "4b02227acc7b4f870bcf2729a71fbf693f603e82" }

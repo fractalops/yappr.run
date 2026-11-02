@@ -1,0 +1,6 @@
+[build]
+target = "wasm32-unknown-unknown"
+
+[target.wasm32-unknown-unknown]
+# getrandom gets its randomness from the browser.
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
