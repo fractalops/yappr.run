@@ -25,7 +25,7 @@ pnpm --dir app check
 YAPPR_BIN=/path/to/yappr pnpm --dir app test:e2e
 ```
 
-The browser tests pair a page with the CLI and use the public relays, so they need internet access.
+The browser tests pair a page with the CLI and use the public [relays](https://docs.iroh.computer/concepts/relays), so they need internet access.
 
 ## Source layout
 

@@ -56,7 +56,7 @@ The answer stays queued on this device until the computer confirms it.
 - The feed shows 100 entries at a time. Select **Show older entries** to load more.
 - Use one Yappr tab at a time.
 
-Connections are end-to-end encrypted. An iroh relay carries the browser's
+Connections are end-to-end encrypted. An [iroh](https://www.iroh.computer/) [relay](https://docs.iroh.computer/concepts/relays) carries the browser's
 traffic and cannot read your entries or answers.
 
 ## More
