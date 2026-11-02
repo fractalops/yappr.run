@@ -21,4 +21,4 @@ tokio = { version = "1", default-features = false, features = ["macros", "sync"]
 wasm-bindgen = "=0.2.129"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = ["console", "Storage", "Window"] }
-yappr = { git = "https://github.com/fractalops/yappr", rev = "4b02227acc7b4f870bcf2729a71fbf693f603e82" }
+yappr = { git = "https://github.com/fractalops/yappr", rev = "302c2244c12af9e782fd64d316464dd588818524" }
