@@ -95,6 +95,10 @@ test("a paired page gets new entries and answers a question while start runs", a
   await expect(row).toBeVisible();
   await row.click();
   await expect(page.getByText("Signed", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Copy text", exact: true }).click();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("Build finished\n\nAll checks passed.");
+  await page.getByRole("button", { name: "Copy signed entry", exact: true }).click();
+  expect(JSON.parse(await page.evaluate(() => navigator.clipboard.readText())).entry.title).toBe("Build finished");
   await answer(page, "Deploy?", "yes");
   await page.reload();
   await expect(row).toHaveCount(1);
@@ -108,6 +112,10 @@ test("post and ask deliver to the page when start does not run", async ({ page }
   await answer(page, "Retry the backup?", "no");
   const status = JSON.parse((await cli("status", "--output", "json")).stdout);
   expect(status.peers[0].receives).toBe(true);
+  // With no start, the page cannot reach the machine: offline, not reconnecting.
+  await expect(page.getByRole("button", { name: "Connection: Offline. Open setup", exact: true })).toBeVisible({ timeout: 90_000 });
+  await page.getByRole("tab", { name: "Setup", exact: true }).click();
+  await expect(page.getByText("This device cannot reach it.")).toBeVisible();
 });
 
 test("a long history loads a page at a time and keeps the book small", async ({ page }) => {

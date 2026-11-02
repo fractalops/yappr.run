@@ -125,7 +125,7 @@
 
   function healthLabel(health: Health): string {
     if (health.state === "connected") return `${health.route === "relay" ? "Relay" : health.route === "direct" ? "Direct" : "Connected"}${health.rtt_ms !== null ? ` · ${Math.round(health.rtt_ms)} ms` : ""}`;
-    const labels: Record<string, string> = { connecting: "Connecting", reconnecting: "Reconnecting", denied: "Access denied", paused: "Paused", disconnected: "Disconnected", stopped: "Stopped" };
+    const labels: Record<string, string> = { connecting: "Connecting", reconnecting: "Reconnecting", offline: "Offline", denied: "Access denied", paused: "Paused", disconnected: "Disconnected", stopped: "Stopped" };
     return labels[health.state] ?? health.state;
   }
   // A machine that delivers to this page is connected, also when the page
@@ -146,11 +146,17 @@
   function selectWriter(event:Event) { selectedMachine=(event.target as HTMLSelectElement).value; void loadRows(true); }
   let copiedEntry=$state('');
   function shortId(id:string) { return id.length>16 ? `${id.slice(0,8)}…${id.slice(-4)}` : id; }
-  // The entry with its machine and log, which a program needs to check the signature.
-  async function copySigned(item:FeedItem) {
-    const signed=JSON.stringify({writer:item.writer.id,log:item.writer.log,entry:item.entry});
-    try{await navigator.clipboard.writeText(signed);copiedEntry=item.key;setTimeout(()=>{if(copiedEntry===item.key)copiedEntry='';},1600);}
+  async function copy(text:string,key:string) {
+    try{await navigator.clipboard.writeText(text);copiedEntry=key;setTimeout(()=>{if(copiedEntry===key)copiedEntry='';},1600);}
     catch{error='The clipboard is unavailable.';}
+  }
+  // The title and the body as people read them. A Markdown body keeps its syntax.
+  function copyText(item:FeedItem) {
+    void copy([item.entry.title,item.entry.body].filter(Boolean).join("\n\n"),`${item.key}:text`);
+  }
+  // The entry with its machine and log, which a program needs to check the signature.
+  function copySigned(item:FeedItem) {
+    void copy(JSON.stringify({writer:item.writer.id,log:item.writer.log,entry:item.entry}),`${item.key}:signed`);
   }
   async function toggleWriter(writer: Writer) {
     try { view = await invoke<View>("set_writer_enabled", { writerId: writer.id, enabled: !writer.enabled }); }
@@ -362,7 +368,8 @@
     {#if view.writers.length}
       <section class="connected-devices" aria-label="Connected machines">
         {#each view.writers as writer(writer.id)}
-          <div class="connected-device"><div><strong>{writer.name}</strong><p>{writerLabel(writer)}</p></div>
+          <div class="connected-device"><div><strong>{writer.name}</strong><p>{writerLabel(writer)}</p>
+            {#if writer.enabled && !writer.delivering && writer.health.state === "offline"}<p class="offline-hint">This device cannot reach it. Run <code>yappr start</code> on that machine.</p>{/if}</div>
             <div class="device-actions"><button onclick={()=>toggleWriter(writer)} aria-label={`${writer.enabled?'Pause':'Resume'} ${writer.name}`}>{writer.enabled?'Pause':'Resume'}</button></div></div>
         {/each}
       </section>
@@ -514,11 +521,18 @@
                     <span class="verified" title="The machine's signature was checked">
                       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6z"/><path d="m8.5 12 2.5 2.5 4.5-5"/></svg>Signed
                     </span>
-                    <button class="entry-copy" onclick={()=>copySigned(item)} aria-label="Copy signed entry" title="Copy signed entry">
-                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg>
-                      {copiedEntry===item.key?'Copied':'Copy'}
-                    </button>
                   {/if}
+                  <span class="entry-copies">
+                    <button class="entry-copy" onclick={()=>copyText(item)} aria-label="Copy text" title="Copy the title and the text">
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg>
+                      {copiedEntry===`${item.key}:text`?'Copied':'Copy text'}
+                    </button>
+                    {#if entry.sig}
+                      <button class="entry-copy" onclick={()=>copySigned(item)} aria-label="Copy signed entry" title="Copy the signed entry as JSON, for programs that check the signature">
+                        {copiedEntry===`${item.key}:signed`?'Copied':'Copy signed'}
+                      </button>
+                    {/if}
+                  </span>
                 </div>
                 <dl class="entry-details">
                   {#if q}
@@ -705,7 +719,10 @@
   .entry-machine code { color: var(--subtle); }
   .verified { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
   .verified svg { color: #91ad99; }
-  .entry-copy { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; min-height: 28px; padding: 3px 0 3px 6px; border: 0; border-radius: 4px; background: transparent; color: var(--subtle); font-size: 11px; }
+  .entry-copies { display: inline-flex; gap: 12px; margin-left: auto; }
+  .offline-hint { margin-top: 4px !important; }
+  .offline-hint code { font-size: 11px; }
+  .entry-copy { display: inline-flex; align-items: center; gap: 5px; min-height: 28px; padding: 3px 0 3px 6px; border: 0; border-radius: 4px; background: transparent; color: var(--subtle); font-size: 11px; }
   .entry-copy:hover { color: #e0e3e8; }
   .entry-details { display: flex; flex-wrap: wrap; gap: 3px 14px; margin: 2px 0 0; font-size: 11px; }
   .entry-details > div { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 5px; min-width: 0; max-width: 100%; }

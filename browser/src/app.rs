@@ -462,6 +462,10 @@ async fn run_follow(
         // While the machine sends its history, entries are saved in batches.
         let mut batch = Vec::new();
         let mut live = false;
+        // A failure after a connection that worked is a reconnect. A failure
+        // with no connection since the last one means that the machine is
+        // offline.
+        let mut reached = false;
         let mut follower = Follower::new(
             endpoint.clone(),
             ticket.endpoint_addr().clone(),
@@ -484,6 +488,7 @@ async fn run_follow(
                     save_entries(app, state, &id, follower.log(), std::mem::take(&mut batch))
                         .await?;
                     live = true;
+                    reached = true;
                     if let Some(conn) = follower.connection() {
                         set_follow_health(app, state, &id, health::snapshot(&conn)).await;
                         let (app, shared, id) = (app.clone(), state.clone(), id.clone());
@@ -506,11 +511,16 @@ async fn run_follow(
                     // A new connection sends the history again first.
                     live = false;
                     observer.take();
+                    let health = if std::mem::take(&mut reached) {
+                        "reconnecting"
+                    } else {
+                        "offline"
+                    };
                     set_follow_health(
                         app,
                         state,
                         &id,
-                        Health::failure("reconnecting", error, Some(delay.as_millis() as u64)),
+                        Health::failure(health, error, Some(delay.as_millis() as u64)),
                     )
                     .await;
                 }
