@@ -2,6 +2,8 @@
 
 Read updates and answer questions from your machines at [yappr.run](https://yappr.run/).
 The app works in a browser on your phone or computer. You do not need an account.
+Connections are end-to-end encrypted. An [iroh](https://www.iroh.computer/) [relay](https://docs.iroh.computer/concepts/relays) carries the browser's
+traffic and cannot read your entries or answers.
 
 <img src="docs/assets/entries.gif" alt="Yappr shows multiline updates, changing warning and alert states, Markdown, and structured data" width="440" />
 
@@ -47,17 +49,6 @@ The answer stays queued on this device until the computer confirms it.
 **Open** shows questions waiting for your answer.
 
 <img src="docs/assets/questions-and-approvals.gif" alt="Yappr offers three choices, undoes a selection, and confirms an answer and an approval" width="440" />
-
-## Everyday use
-
-- Keep the page open and your device awake to receive updates and send answers.
-- Leave `yappr start` running on your computer. Reopen the page to catch up on missed entries.
-- The app saves entries and queued answers in this browser on this device. It keeps the newest 5,000 entries per machine.
-- The feed shows 100 entries at a time. Select **Show older entries** to load more.
-- Use one Yappr tab at a time.
-
-Connections are end-to-end encrypted. An [iroh](https://www.iroh.computer/) [relay](https://docs.iroh.computer/concepts/relays) carries the browser's
-traffic and cannot read your entries or answers.
 
 ## More
 

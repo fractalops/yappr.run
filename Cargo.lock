@@ -4407,7 +4407,7 @@ dependencies = [
 [[package]]
 name = "yappr"
 version = "0.1.0"
-source = "git+https://github.com/fractalops/yappr?rev=302c2244c12af9e782fd64d316464dd588818524#302c2244c12af9e782fd64d316464dd588818524"
+source = "git+https://github.com/fractalops/yappr?rev=962a9d2db73938fa3700315435607c37b96eec95#962a9d2db73938fa3700315435607c37b96eec95"
 dependencies = [
  "anyhow",
  "cfg_aliases",
