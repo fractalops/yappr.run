@@ -109,3 +109,40 @@ test("post and ask deliver to the page when start does not run", async ({ page }
   const status = JSON.parse((await cli("status", "--output", "json")).stdout);
   expect(status.peers[0].receives).toBe(true);
 });
+
+test("a long history loads a page at a time and keeps the book small", async ({ page }) => {
+  // 1200 entries before pairing. The writer delivers them all after pairing.
+  const lines = Array.from({ length: 1200 }, (_, i) => JSON.stringify({ title: `Entry ${i + 1}`, body: "x" }));
+  const posting = execFile(binary, ["--dir", dir, "post", "--json"], { env: env() });
+  posting.stdin!.end(lines.join("\n") + "\n");
+  await new Promise((done) => posting.once("exit", done));
+  await pair(page);
+  const rows = page.locator("article.feed-row");
+  await expect(page.getByRole("button", { name: "Entry 1200. Show full text and details", exact: true })).toBeVisible();
+  await expect(rows).toHaveCount(100);
+  await page.getByRole("button", { name: "Show older entries", exact: true }).click();
+  await expect(rows).toHaveCount(200);
+  // The machine list stays small: the entries are in IndexedDB.
+  const book = await page.evaluate(() => localStorage.getItem("yappr.readers") ?? "");
+  expect(book.length).toBeLessThan(10_000);
+  await expect.poll(async () => JSON.parse(await page.evaluate(() => localStorage.getItem("yappr.readers") ?? "{}"))
+    .writers?.[Object.keys(JSON.parse(book).writers)[0]]?.last_id, { timeout: 60_000 }).toBe(1200);
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Entry 1200. Show full text and details", exact: true })).toBeVisible();
+  await expect(rows).toHaveCount(100);
+});
+
+test("entries that an older page saved move to IndexedDB", async ({ page }) => {
+  const ticket = (await cli("ticket")).stdout.trim();
+  const writer = (await cli("id")).stdout.trim();
+  const entries = [1, 2, 3].map((id) => ({ v: 1, id, time: `2026-11-01T10:00:0${id}Z`, source: "old", kind: "event", title: `Old ${id}`, body: "b" }));
+  const book = { writers: { [writer]: { ticket, name: "Old laptop", entries, enabled: false } }, selected: null, invitation: null };
+  await page.addInitScript((value) => { if (!localStorage.getItem("yappr.readers")) localStorage.setItem("yappr.readers", value); }, JSON.stringify(book));
+  await page.goto("./");
+  await page.getByRole("tab", { name: "Feed", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Old 3. Show full text and details", exact: true })).toBeVisible();
+  await expect(page.locator("article.feed-row")).toHaveCount(3);
+  const saved = JSON.parse(await page.evaluate(() => localStorage.getItem("yappr.readers") ?? "{}"));
+  expect(saved.writers[writer].entries).toBeUndefined();
+  expect(saved.writers[writer].last_id).toBe(3);
+});

@@ -3,6 +3,7 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use crate::{
+    entries,
     outbox::{self, Delivery},
     readers::{self, PendingPair, Readers},
     storage::{load_or_create_secret, Dir, RelayStore},
@@ -13,7 +14,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::sync::{Mutex, Notify, Semaphore};
 use wasm_bindgen::prelude::*;
 use yappr::{
-    choices::{self, QuestionState},
+    choices::{QuestionState, Tracker},
     client::{Denied, Event, Follower},
     control::ControlClient,
     deliver,
@@ -34,7 +35,7 @@ struct WriterView {
     name: String,
     ticket: String,
     log: Option<String>,
-    entries: Vec<Entry>,
+    last_id: u64,
     questions: Vec<QuestionState>,
     enabled: bool,
     /// The machine has a delivery connection open to this page.
@@ -57,6 +58,12 @@ struct View {
 enum UiEvent {
     View {
         view: View,
+    },
+    /// New saved entries, and the question states of their machine.
+    Entries {
+        writer_id: String,
+        rows: Vec<Row>,
+        questions: Vec<QuestionState>,
     },
     Health {
         writer_id: String,
@@ -85,6 +92,11 @@ struct AppState {
     /// Takes the deliveries to the runtime's endpoint.
     receiver: Mutex<Option<JoinHandle<()>>>,
     book: Mutex<Option<Readers>>,
+    /// The question states of each machine, built from its saved entries.
+    trackers: Mutex<Option<BTreeMap<String, Tracker>>>,
+    /// One entry is saved at a time, so that an entry from two connections
+    /// is saved once.
+    saving: Mutex<()>,
     tasks: Mutex<BTreeMap<String, JoinHandle<()>>>,
     pair_task: Mutex<Option<JoinHandle<()>>>,
     worker: Mutex<Option<JoinHandle<()>>>,
@@ -94,6 +106,16 @@ struct AppState {
     lifecycle: Mutex<()>,
     wake: Notify,
 }
+/// A saved entry and the time of the entry in Unix milliseconds, its place
+/// in the feed.
+#[derive(Debug, Clone, Serialize)]
+struct Row {
+    ms: i64,
+    entry: Entry,
+}
+/// The most entries that the page saves in one step while a machine sends
+/// its history.
+const BATCH: usize = 256;
 /// The page callback for events.
 #[derive(Clone)]
 struct AppHandle {
@@ -115,9 +137,47 @@ fn err(error: impl std::fmt::Display) -> String {
 async fn book(state: &AppState) -> Result<Readers, String> {
     let mut slot = state.book.lock().await;
     if slot.is_none() {
-        *slot = Some(Readers::load(&Dir).map_err(err)?);
+        let mut readers = Readers::load(&Dir).map_err(err)?;
+        // Move the entries that an older page saved in the book.
+        let mut moved = false;
+        for (id, writer) in readers.writers.iter_mut() {
+            if writer.entries.is_empty() {
+                continue;
+            }
+            entries::save(id, &writer.entries).await.map_err(err)?;
+            let last = writer.entries.iter().map(|e| e.id).max().unwrap_or(0);
+            writer.last_id = writer.last_id.max(last);
+            writer.entries.clear();
+            moved = true;
+        }
+        if moved {
+            readers.save(&Dir).map_err(err)?;
+        }
+        *slot = Some(readers);
     }
     Ok(slot.as_ref().expect("book exists").clone())
+}
+/// The question states of the machine `id`.
+async fn questions(state: &AppState, id: &str) -> Result<Vec<QuestionState>, String> {
+    let readers = book(state).await?;
+    let mut slot = state.trackers.lock().await;
+    if slot.is_none() {
+        let mut all = BTreeMap::new();
+        for id in readers.writers.keys() {
+            let mut tracker = Tracker::default();
+            for entry in entries::all(id).await.map_err(err)? {
+                tracker.push(&entry);
+            }
+            all.insert(id.clone(), tracker);
+        }
+        *slot = Some(all);
+    }
+    Ok(slot
+        .as_ref()
+        .expect("trackers exist")
+        .get(id)
+        .map(Tracker::states)
+        .unwrap_or_default())
 }
 async fn update<T>(
     state: &AppState,
@@ -152,6 +212,10 @@ async fn runtime(app: &AppHandle, state: &Arc<AppState>) -> Result<Runtime, Stri
 }
 async fn view(state: &AppState) -> Result<View, String> {
     let book = book(state).await?;
+    let mut states = BTreeMap::new();
+    for id in book.writers.keys() {
+        states.insert(id.clone(), questions(state, id).await?);
+    }
     let health = state.health.lock().await;
     let delivering = state.delivering.lock().await;
     let writers = book
@@ -166,12 +230,12 @@ async fn view(state: &AppState) -> Result<View, String> {
                 })
             }),
             delivering: delivering.contains_key(&id),
-            questions: choices::list(&writer.entries),
+            questions: states.remove(&id).unwrap_or_default(),
             id,
             name: writer.name,
             ticket: writer.ticket,
             log: writer.log,
-            entries: writer.entries,
+            last_id: writer.last_id,
             enabled: writer.enabled,
         })
         .collect();
@@ -315,18 +379,70 @@ impl Drop for Observer {
         self.0.abort();
     }
 }
-/// Save an entry from a machine with the name of its log.
-async fn save_entry(
+/// Save entries from a machine with the name of its log, and show them on the
+/// page. Returns when the entries are on disk.
+async fn save_entries(
+    app: &AppHandle,
     state: &AppState,
     id: &str,
     log: Option<&str>,
-    entry: Entry,
+    batch: Vec<Entry>,
 ) -> Result<(), String> {
-    update(state, |book| {
-        book.set_log(id, log.map(String::from)).map_err(err)?;
-        book.push(id, entry).map_err(err)
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let _saving = state.saving.lock().await;
+    if update(state, |book| {
+        book.set_log(id, log.map(String::from)).map_err(err)
     })
-    .await
+    .await?
+    {
+        entries::clear(id).await.map_err(err)?;
+        if let Some(all) = state.trackers.lock().await.as_mut() {
+            all.insert(id.into(), Tracker::default());
+        }
+    }
+    let readers = book(state).await?;
+    let mut new = Vec::new();
+    for entry in batch {
+        if readers.is_new(id, &entry).map_err(err)?
+            && new.last().is_none_or(|e: &Entry| e.id < entry.id)
+        {
+            new.push(entry);
+        }
+    }
+    let Some(last) = new.last().map(|e| e.id) else {
+        return Ok(());
+    };
+    // Build the question states from the saved entries before these entries
+    // are saved, so that the tracker gets each entry once.
+    questions(state, id).await?;
+    entries::save(id, &new).await.map_err(err)?;
+    update(state, |book| book.saved(id, last).map_err(err)).await?;
+    let states = {
+        let mut slot = state.trackers.lock().await;
+        let tracker = slot
+            .as_mut()
+            .expect("trackers exist")
+            .entry(id.into())
+            .or_default();
+        for entry in &new {
+            tracker.push(entry);
+        }
+        tracker.states()
+    };
+    app.emit(UiEvent::Entries {
+        writer_id: id.into(),
+        rows: new
+            .into_iter()
+            .map(|entry| Row {
+                ms: entry.time.as_millisecond(),
+                entry,
+            })
+            .collect(),
+        questions: states,
+    });
+    Ok(())
 }
 async fn run_follow(
     app: &AppHandle,
@@ -343,11 +459,14 @@ async fn run_follow(
             .cloned()
             .ok_or("The machine does not exist")?;
         let mut observer = None;
+        // While the machine sends its history, entries are saved in batches.
+        let mut batch = Vec::new();
+        let mut live = false;
         let mut follower = Follower::new(
             endpoint.clone(),
             ticket.endpoint_addr().clone(),
             Request {
-                since: saved.last_id(),
+                since: saved.last_id,
                 log: saved.log,
                 ..Default::default()
             },
@@ -355,10 +474,16 @@ async fn run_follow(
         loop {
             match follower.next().await {
                 Ok(Some(Event::Entry(entry))) => {
-                    save_entry(state, &id, follower.log(), entry).await?;
-                    emit_view(app, state).await;
+                    batch.push(entry);
+                    if live || batch.len() >= BATCH {
+                        save_entries(app, state, &id, follower.log(), std::mem::take(&mut batch))
+                            .await?;
+                    }
                 }
                 Ok(Some(Event::CaughtUp { .. })) => {
+                    save_entries(app, state, &id, follower.log(), std::mem::take(&mut batch))
+                        .await?;
+                    live = true;
                     if let Some(conn) = follower.connection() {
                         set_follow_health(app, state, &id, health::snapshot(&conn)).await;
                         let (app, shared, id) = (app.clone(), state.clone(), id.clone());
@@ -376,6 +501,10 @@ async fn run_follow(
                     }
                 }
                 Ok(Some(Event::Retrying { delay, error })) => {
+                    save_entries(app, state, &id, follower.log(), std::mem::take(&mut batch))
+                        .await?;
+                    // A new connection sends the history again first.
+                    live = false;
                     observer.take();
                     set_follow_health(
                         app,
@@ -442,7 +571,7 @@ async fn take_delivery(
         return Ok(());
     };
     let req = Request {
-        since: saved.last_id(),
+        since: saved.last_id,
         log: saved.log,
         ..Default::default()
     };
@@ -458,15 +587,25 @@ async fn take_delivery(
     // Queued answers for this machine can go on this connection now.
     state.wake.notify_one();
     let result = async {
+        // While the machine sends its history, entries are saved in batches.
+        let mut batch = Vec::new();
+        let mut live = false;
         loop {
             match sub.next().await.map_err(err)? {
                 Some(Frame::Entry { entry }) => {
                     let saved = entry.id;
-                    save_entry(state, &id, sub.log(), entry).await?;
-                    emit_view(app, state).await;
-                    sub.stored(saved).await.map_err(err)?;
+                    batch.push(entry);
+                    if live || batch.len() >= BATCH {
+                        save_entries(app, state, &id, sub.log(), std::mem::take(&mut batch))
+                            .await?;
+                        sub.stored(saved).await.map_err(err)?;
+                    }
                 }
-                Some(Frame::CaughtUp { head }) => sub.stored(head).await.map_err(err)?,
+                Some(Frame::CaughtUp { head }) => {
+                    save_entries(app, state, &id, sub.log(), std::mem::take(&mut batch)).await?;
+                    sub.stored(head).await.map_err(err)?;
+                    live = true;
+                }
                 Some(_) => {}
                 None => return Ok(()),
             }
@@ -560,7 +699,11 @@ async fn choose(
     if !writer.enabled {
         return Err("Resume this machine before answering.".into());
     }
-    let question = choices::get(&writer.entries, &question_id).map_err(err)?;
+    let question = questions(&state, &writer_id)
+        .await?
+        .into_iter()
+        .find(|q| q.question.id == question_id)
+        .ok_or("The question does not exist")?;
     if question
         .question
         .expires_at
@@ -836,6 +979,14 @@ struct ChooseArgs {
     value: String,
 }
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PageArgs {
+    /// The place of the last entry that the page has: [ms, writer, id].
+    before: Option<serde_json::Value>,
+    limit: u32,
+    writer_id: Option<String>,
+}
+#[derive(Deserialize)]
 struct InvitationArgs {
     invitation: String,
 }
@@ -865,6 +1016,18 @@ async fn call(
 ) -> Result<serde_json::Value, String> {
     match command {
         "snapshot" => json(view(&state).await),
+        "entries" => {
+            let a: PageArgs = args(value)?;
+            book(&state).await?;
+            let before = a.before.map(|b| b.to_string()).unwrap_or_default();
+            entries::page(
+                &before,
+                a.limit.min(500),
+                a.writer_id.as_deref().unwrap_or(""),
+            )
+            .await
+            .map_err(err)
+        }
         "resume" => json(resume(app, state).await),
         "preview_feed" => {
             let a: FollowArgs = args(value)?;

@@ -11,14 +11,19 @@
     responder: string; expires_at: string | null; approval: boolean }; status: string; decision: { value: string; responder: string } | null };
   type Delivery = { decision?:Question["decision"]; ticket: string; writer: string; submission: { question_id: string; value: string }; status: string; error: string | null };
   type Health = { state: string; route: string | null; address: string | null; rtt_ms: number | null; error: string | null; retry_in_ms: number | null };
-  type Writer = { id: string; name: string; ticket: string; log: string | null; entries: Entry[]; questions: Question[]; enabled: boolean; delivering: boolean; health: Health };
+  type Writer = { id: string; name: string; ticket: string; log: string | null; last_id: number; questions: Question[]; enabled: boolean; delivering: boolean; health: Health };
+  // One saved entry and its place in the feed: time, machine, id.
+  type Row = { writer: string; ms: number; entry: Entry };
   type Network = { disabled: boolean; urls: string[] };
   type View = { device_id: string; writers: Writer[]; selected: string | null; deliveries: Delivery[];
     pairing: boolean; pairing_code: string | null; pairing_name: string | null; network: Network };
   type Preview = { name: string; writer_id: string; expires_at: string|null; ticket?:string };
   type FeedEvent = { type: "view"; view: View } | { type: "status"; text: string } | { type: "pair_failed"; message: string }
     | { type: "pair_state"; state: "sending" | "waiting" | "retrying" }
-    | { type: "health"; writer_id: string; health: Health };
+    | { type: "health"; writer_id: string; health: Health }
+    | { type: "entries"; writer_id: string; rows: { ms: number; entry: Entry }[]; questions: Question[] };
+  // The page loads the feed in parts of this many entries, newest first.
+  const PAGE = 100;
 
   let selectedMachine = $state("");
   let screen=$state('feed');
@@ -54,29 +59,65 @@
   const sendTimers = new Map<string, ReturnType<typeof setTimeout>>();
   let now = $state(Date.now());
   const hasConnections=$derived(view.writers.length>0);
-  const hasHistory=$derived(view.writers.some(w=>w.entries.length>0));
+  const hasHistory=$derived(view.writers.some(w=>w.last_id>0));
+  // The loaded entries, newest first, and whether older entries can exist.
+  let rows = $state<Row[]>([]);
+  let older = $state(false);
+  let loading = $state(false);
+  // The place of a row: newest first, then by machine and id, as in storage.
+  function before(a: Row, b: Row): boolean {
+    return a.ms !== b.ms ? a.ms > b.ms : a.writer !== b.writer ? a.writer > b.writer : a.entry.id > b.entry.id;
+  }
+  // Add new rows in their places. While older rows are not loaded, rows that
+  // belong after the last loaded row wait for "Show older entries".
+  function merged(old: Row[], add: Row[]): Row[] {
+    const keys = new Set(old.map((r) => `${r.writer}:${r.entry.id}`));
+    const last = old.at(-1);
+    const fresh = add.filter((r) => !keys.has(`${r.writer}:${r.entry.id}`) && (!older || !last || before(r, last)));
+    const all = [...old, ...fresh].sort((a, b) => (before(a, b) ? -1 : 1));
+    // A long catch-up shows its newest page; the rest is one click away.
+    if (all.length > Math.max(old.length, PAGE)) { older = true; return all.slice(0, Math.max(old.length, PAGE)); }
+    return all;
+  }
+  async function loadRows(reset: boolean) {
+    if (loading) return;
+    loading = true;
+    try {
+      const last = reset ? null : rows.at(-1);
+      const page = await invoke<Row[]>("entries", { before: last ? [last.ms, last.writer, last.entry.id] : null,
+        limit: PAGE, writerId: selectedMachine || null });
+      rows = reset ? page : [...rows, ...page];
+      older = page.length === PAGE;
+    } catch (e) { error = String(e); }
+    finally { loading = false; }
+  }
 
   type FeedItem = { key: string; writer: Writer; entry: Entry; question?: Question };
   const machines = $derived(view.writers.map(w=>({id:w.id,name:w.name})));
   const selectedWriters = $derived(view.writers.filter((w) => !selectedMachine || w.id === selectedMachine));
   const feed = $derived.by(() => {
-    const items:FeedItem[] = selectedWriters.flatMap((writer) => {
-    const questions = new Map(writer.questions.map((q) => [q.question.id, q]));
-    // A state entry replaces the earlier state entries with the same subject.
-    const newestState = new Map<string, number>();
-    for (const entry of writer.entries) {
-      if (entry.kind === "state" && entry.subject && entry.id > (newestState.get(entry.subject) ?? 0)) newestState.set(entry.subject, entry.id);
-    }
-    return writer.entries.flatMap((entry): FeedItem[] => {
+    const writers = new Map(view.writers.map((w) => [w.id, w]));
+    const questions = new Map(view.writers.flatMap((w) => w.questions.map((q) => [`${w.id}:${q.question.id}`, q] as const)));
+    // A state entry replaces the older state entries with the same subject.
+    // The rows are newest first, so the first one of a subject stays.
+    const seen = new Set<string>();
+    return rows.flatMap((row): FeedItem[] => {
+      const writer = writers.get(row.writer);
+      const { entry } = row;
+      if (!writer || (selectedMachine && writer.id !== selectedMachine)) return [];
       if (entry.choices?.type === "decision" || entry.choices?.type === "cancelled") return [];
-      if (entry.kind === "state" && entry.subject && newestState.get(entry.subject) !== entry.id) return [];
+      if (entry.kind === "state" && entry.subject) {
+        const subject = `${writer.id}:${entry.subject}`;
+        if (seen.has(subject)) return [];
+        seen.add(subject);
+      }
       return [{ key: `${writer.id}:${entry.id}`, writer, entry,
-        question: entry.choices?.type === "question" ? questions.get(entry.choices.question?.id ?? "") : undefined }];
+        question: entry.choices?.type === "question" ? questions.get(`${writer.id}:${entry.choices.question?.id ?? ""}`) : undefined }];
     });
   });
-    return items.sort((a,b)=>Date.parse(b.entry.time)-Date.parse(a.entry.time)||a.key.localeCompare(b.key));
-  });
-  const pending = $derived(feed.filter((item) => item.question && stateOf(item.question) === "pending").length);
+  // Count the open questions of all saved entries, also the ones that the
+  // page has not loaded.
+  const pending = $derived(selectedWriters.reduce((n, w) => n + w.questions.filter((q) => stateOf(q) === "pending").length, 0));
   const visibleFeed = $derived(tab === "open" ? feed.filter((item) => item.question && stateOf(item.question) === "pending") : feed);
   const connected = $derived(selectedWriters.filter((w) => w.delivering || w.health.state === "connected").length);
   const allConnected = $derived(connected>0 && connected===selectedWriters.length);
@@ -102,7 +143,7 @@
     screen=next;
     document.getElementById(`${next}-tab`)?.focus();
   }
-  function selectWriter(event:Event) { selectedMachine=(event.target as HTMLSelectElement).value; }
+  function selectWriter(event:Event) { selectedMachine=(event.target as HTMLSelectElement).value; void loadRows(true); }
   let copiedEntry=$state('');
   function shortId(id:string) { return id.length>16 ? `${id.slice(0,8)}…${id.slice(-4)}` : id; }
   // The entry with its machine and log, which a program needs to check the signature.
@@ -268,6 +309,12 @@
       } else if (payload.type === "pair_failed") { pairing = false; pairStep = "idle"; screen="devices"; error = payload.message; }
       else if (payload.type === "pair_state") { if (pairStep !== "approved") pairStep = payload.state; }
       else if (payload.type === "health") view = { ...view, writers: view.writers.map((writer) => writer.id === payload.writer_id ? { ...writer, health: payload.health } : writer) };
+      else if (payload.type === "entries") {
+        const last = payload.rows.at(-1)?.entry.id ?? 0;
+        view = { ...view, writers: view.writers.map((writer) => writer.id === payload.writer_id
+          ? { ...writer, questions: payload.questions, last_id: Math.max(writer.last_id, last) } : writer) };
+        rows = merged(rows, payload.rows.map((r) => ({ writer: payload.writer_id, ...r })));
+      }
       else status = payload.text;
     });
     (async () => {
@@ -282,6 +329,7 @@
         relayMode=saved.network.disabled?'direct':saved.network.urls.length?'custom':'default';
         relayUrls=saved.network.urls.join('\n');
         if (!saved.writers.length) screen = "devices";
+        await loadRows(true);
         view = await invoke<View>("resume");
         // Ask the browser to keep the saved entries when it needs space.
         navigator.storage?.persist?.().catch(() => {});
@@ -487,6 +535,7 @@
           </div>
         </article>
       {/each}
+      {#if older}<button class="older" onclick={() => loadRows(false)} disabled={loading}>{loading ? "Loading…" : "Show older entries"}</button>{/if}
     </section>
     {/if}
     </div>
@@ -506,6 +555,7 @@
   .connection-content {padding:18px;}.connection-content h2{margin:0;font-size:15px;}.step-label{font-size:12px;color:#c2c8d1;margin:18px 0 8px;}
   .setup-command {margin:0;padding:10px;border:1px solid var(--border);border-radius:6px;background:#15171b;font:12px/1.6 ui-monospace,monospace;white-space:pre-wrap;overflow-wrap:anywhere;}
   .confirm-actions {display:flex;align-items:center;gap:16px;margin-top:10px;}.connection-success{font-size:12px;color:var(--good);margin:12px 0;}
+  .older {display:block;width:calc(100% - 2 * var(--gutter));margin:14px var(--gutter);min-height:40px;border:1px solid var(--border);border-radius:7px;background:none;color:var(--muted);font-size:13px;}
   .view-feed {display:flex;justify-content:space-between;align-items:center;width:calc(100% - 2 * var(--gutter));margin:14px var(--gutter);padding:10px 12px;border:1px solid #3a3f49;border-radius:7px;background:#1d2026;color:#d0d4dd;font-size:13px;}
   .setup-empty {padding:32px var(--gutter);}.setup-empty p{margin:8px 0 18px;}.device-panel>summary{padding:0;min-height:24px;}.device-panel {margin-bottom:14px;}
   :global(:root) {

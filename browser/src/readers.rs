@@ -1,4 +1,5 @@
-//! The machines that this page reads, each with its own saved history.
+//! The machines that this page reads. Their entries are in IndexedDB, see
+//! `entries.rs`.
 use std::collections::BTreeMap;
 
 use anyhow::{bail, Context, Result};
@@ -16,6 +17,12 @@ const MAX_WRITERS: usize = 32;
 pub struct Reader {
     pub ticket: String,
     pub name: String,
+    /// The id of the last saved entry, or 0.
+    #[serde(default)]
+    pub last_id: u64,
+    /// Entries that a page saved here before it used IndexedDB. The page
+    /// moves them to IndexedDB once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entries: Vec<Entry>,
     /// The name of the machine's log, see `yappr::store`. Entries from
     /// before log names have none.
@@ -24,13 +31,6 @@ pub struct Reader {
     /// A paused machine is not read, and its deliveries are refused.
     #[serde(default = "enabled")]
     pub enabled: bool,
-}
-
-impl Reader {
-    /// The id of the last saved entry, or 0.
-    pub fn last_id(&self) -> u64 {
-        self.entries.last().map_or(0, |e| e.id)
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,14 +63,6 @@ impl Readers {
             if ticket.endpoint_addr().id.to_string() != *id {
                 bail!("the machine ticket belongs to another identity");
             }
-            let mut last = 0;
-            for entry in &writer.entries {
-                entry.validate()?;
-                if entry.id <= last {
-                    bail!("the saved feed is not in entry order");
-                }
-                last = entry.id;
-            }
             validate_name(&writer.name)?;
         }
         Ok(())
@@ -89,6 +81,7 @@ impl Readers {
         let writer = self.writers.entry(id.clone()).or_insert_with(|| Reader {
             ticket: ticket.to_string(),
             name: format!("Machine {}", &id[..8]),
+            last_id: 0,
             entries: Vec::new(),
             log: None,
             enabled: true,
@@ -102,42 +95,42 @@ impl Readers {
         Ok(id)
     }
 
-    /// Save the name of the machine's log. A new log replaces the saved
-    /// history, because its entry ids start again at 1.
-    pub fn set_log(&mut self, writer: &str, log: Option<String>) -> Result<()> {
+    /// Save the name of the machine's log. Returns true when a new log
+    /// replaces the saved history, because its entry ids start again at 1.
+    pub fn set_log(&mut self, writer: &str, log: Option<String>) -> Result<bool> {
         let reader = self
             .writers
             .get_mut(writer)
             .context("the machine does not exist")?;
         if log.is_none() || reader.log == log {
-            return Ok(());
+            return Ok(false);
         }
-        if reader.log.is_some() {
-            reader.entries.clear();
+        let reset = reader.log.is_some();
+        if reset {
+            reader.last_id = 0;
         }
         reader.log = log;
-        Ok(())
+        Ok(reset)
     }
 
-    /// Save an entry. An entry that is saved already changes nothing, so a
-    /// machine can send it on two connections.
-    pub fn push(&mut self, writer: &str, entry: Entry) -> Result<()> {
+    /// True if `entry` is new: its id is after the last saved id. A machine
+    /// can send an entry on two connections, and the page saves it once.
+    pub fn is_new(&self, writer: &str, entry: &Entry) -> Result<bool> {
+        let reader = self
+            .writers
+            .get(writer)
+            .context("the machine does not exist")?;
         entry.validate()?;
-        let entries = &mut self
+        Ok(entry.id > reader.last_id)
+    }
+
+    /// Move the last saved id forward to `id`.
+    pub fn saved(&mut self, writer: &str, id: u64) -> Result<()> {
+        let reader = self
             .writers
             .get_mut(writer)
-            .context("the machine does not exist")?
-            .entries;
-        if let Some(old) = entries.iter().rev().find(|e| e.id == entry.id) {
-            if old != &entry {
-                bail!("the machine changed a saved entry");
-            }
-            return Ok(());
-        }
-        if entries.last().is_some_and(|old| old.id >= entry.id) {
-            bail!("the machine sent entries out of order");
-        }
-        entries.push(entry);
+            .context("the machine does not exist")?;
+        reader.last_id = reader.last_id.max(id);
         Ok(())
     }
 }
@@ -167,30 +160,29 @@ mod tests {
     }
 
     #[test]
-    fn an_entry_from_two_connections_is_saved_once() {
+    fn an_entry_after_the_last_saved_id_is_new() {
         let mut readers = Readers::default();
         let id = readers.add(&ticket(), Some("Laptop".into())).unwrap();
-        readers.push(&id, entry(1, "one")).unwrap();
-        readers.push(&id, entry(1, "one")).unwrap();
-        readers.push(&id, entry(2, "two")).unwrap();
-        assert!(readers.push(&id, entry(2, "changed")).is_err());
-        assert!(readers.push(&id, entry(1, "one")).is_ok());
-        assert_eq!(readers.writers[&id].last_id(), 2);
+        assert!(readers.is_new(&id, &entry(1, "one")).unwrap());
+        readers.saved(&id, 2).unwrap();
+        assert!(!readers.is_new(&id, &entry(2, "two")).unwrap());
+        assert!(readers.is_new(&id, &entry(3, "three")).unwrap());
+        readers.saved(&id, 1).unwrap();
+        assert_eq!(readers.writers[&id].last_id, 2);
         readers.validate().unwrap();
     }
 
     #[test]
-    fn a_new_log_replaces_the_saved_history() {
+    fn a_new_log_starts_the_history_again() {
         let mut readers = Readers::default();
         let id = readers.add(&ticket(), None).unwrap();
-        readers.set_log(&id, Some("a".into())).unwrap();
-        readers.push(&id, entry(1, "old")).unwrap();
-        readers.set_log(&id, None).unwrap();
-        readers.set_log(&id, Some("a".into())).unwrap();
-        assert_eq!(readers.writers[&id].entries.len(), 1);
-        readers.set_log(&id, Some("b".into())).unwrap();
-        assert!(readers.writers[&id].entries.is_empty());
-        readers.push(&id, entry(1, "new")).unwrap();
-        assert_eq!(readers.writers[&id].log.as_deref(), Some("b"));
+        assert!(!readers.set_log(&id, Some("a".into())).unwrap());
+        readers.saved(&id, 5).unwrap();
+        assert!(!readers.set_log(&id, None).unwrap());
+        assert!(!readers.set_log(&id, Some("a".into())).unwrap());
+        assert_eq!(readers.writers[&id].last_id, 5);
+        assert!(readers.set_log(&id, Some("b".into())).unwrap());
+        assert_eq!(readers.writers[&id].last_id, 0);
+        assert!(readers.is_new(&id, &entry(1, "new")).unwrap());
     }
 }

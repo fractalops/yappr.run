@@ -4,7 +4,7 @@ The Yappr app shows the updates and questions from your machines in one feed, in
 It pairs with the [yappr](https://github.com/fractalops/yappr) command line on each machine.
 
 The app runs in the page. It connects to your machines with iroh. A browser cannot open direct connections, so its traffic goes through a relay. The relay passes on encrypted data.
-The app saves the entries in the browser's storage on this device.
+The app saves the entries in the browser's storage on this device. It keeps the newest 5,000 entries of each machine, and the feed shows 100 at a time.
 
 ## Connect a computer
 

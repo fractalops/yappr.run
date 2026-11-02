@@ -6,6 +6,8 @@ mod readers;
 #[cfg(target_family = "wasm")]
 mod app;
 #[cfg(target_family = "wasm")]
+mod entries;
+#[cfg(target_family = "wasm")]
 mod outbox;
 #[cfg(target_family = "wasm")]
 mod storage;
