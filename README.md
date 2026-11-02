@@ -1,59 +1,66 @@
 # Yappr app
 
-The Yappr app shows the updates and questions from your machines in one feed, in a browser.
-It pairs with the [yappr](https://github.com/fractalops/yappr) command line on each machine.
+Read updates and answer questions from your machines at [yappr.run](https://yappr.run/).
+The app works in a browser on your phone or computer. You do not need an account.
 
-The app runs in the page. It connects to your machines with iroh. A browser cannot open direct connections, so its traffic goes through a relay. The relay passes on encrypted data.
-The app saves the entries in the browser's storage on this device. It keeps the newest 5,000 entries of each machine, and the feed shows 100 at a time.
+<img src="docs/assets/entries.gif" alt="Yappr shows multiline updates, changing warning and alert states, Markdown, and structured data" width="440" />
 
-## Connect a computer
+## Connect your phone
 
-[Install yappr](https://github.com/fractalops/yappr#install) on the computer, then start it with a pairing code:
+On your computer, [install the Yappr CLI](https://github.com/fractalops/yappr#install), then create a pairing code:
 
 ```sh
 yappr start --pair
 ```
 
-In the app, open **Setup**, then scan the QR code, import an image of it, or paste the `YAPPR:` code.
-Select **Request pairing**, then enter `y` on the computer to accept the device.
+Leave this terminal open. The QR code and `YAPPR:` code expire after five minutes.
+If Yappr is already running, use `yappr pair` in a second terminal.
 
-The computer delivers each new entry to the app while the page is open, also when `yappr start` does not run: `yappr post`, `ask`, and `approve` deliver by themselves.
-Questions and approvals show their choices in the feed. Select one, and use **Undo** within five seconds if needed.
-**Open** shows the questions that wait for an answer.
+On your phone:
 
-Keep the page open to receive entries. A closed page gets the missed entries when it opens again and the computer runs `yappr start`.
-Only one tab can use the app at a time.
+1. Open [yappr.run](https://yappr.run/) and select **Setup**.
+2. Scan the QR code. You can also import a QR image or paste the `YAPPR:` code.
+3. Set **Your device name** to `phone`, then select **Request pairing**.
+4. Compare the device ID on your phone with the ID in the computer's terminal.
 
-## Build
+If the IDs match, enter `y` in that terminal. The computer prints the saved
+alias. The examples below use `phone`. Use the printed alias if it differs.
 
-Requirements: Rust through rustup, Node.js 24 or newer, and pnpm 10.
-On macOS, install LLVM with `brew install llvm` for the WebAssembly C dependencies.
-
-```sh
-rustup target add wasm32-unknown-unknown
-cargo install wasm-bindgen-cli --version 0.2.129 --locked
-pnpm --dir app install --frozen-lockfile
-./scripts/build.sh
-cargo run -p yappr-serve -- --static pages --listen 127.0.0.1:8088
-```
-
-Then open `http://127.0.0.1:8088`. Set `YAPPR_BASE` to build for a site under a path, such as `/yappr.run`.
-
-## Tests
+In a second terminal on the same computer, send an update:
 
 ```sh
-cargo test -p yappr-browser --target "$(rustc -vV | sed -n 's/host: //p')"
-pnpm --dir app check
-YAPPR_BIN=/path/to/yappr pnpm --dir app test:e2e
+echo "Backup complete" | yappr post --source backup
 ```
 
-The browser tests pair a page with the CLI and use the public relays, so they need internet access.
+On your phone, select **Feed** to see **Backup complete**.
 
-## Source layout
+## Answer a request
 
-| Path | Purpose |
-|---|---|
-| `app/` | Svelte page: the feed, the setup, and the QR reader |
-| `browser/` | The reader in WebAssembly: reading, deliveries, pairing, answers, and browser storage |
-| `serve/` | Static file server for development and tests |
-| `scripts/build.sh` | Builds the reader and the page into `pages/` |
+On your computer, ask for approval:
+
+```sh
+yappr approve phone "Continue the backup?"
+```
+
+Select a choice on your phone. Use **Undo** within five seconds if needed.
+The answer stays queued on this device until the computer confirms it.
+**Open** shows questions waiting for your answer.
+
+<img src="docs/assets/questions-and-approvals.gif" alt="Yappr offers three choices, undoes a selection, and confirms an answer and an approval" width="440" />
+
+## Everyday use
+
+- Keep the page open and your device awake to receive updates and send answers.
+- Leave `yappr start` running on your computer. Reopen the page to catch up on missed entries.
+- The app saves entries and queued answers in this browser on this device. It keeps the newest 5,000 entries per machine.
+- The feed shows 100 entries at a time. Select **Show older entries** to load more.
+- Use one Yappr tab at a time.
+
+Connections are end-to-end encrypted. An iroh relay carries the browser's
+traffic and cannot read your entries or answers.
+
+## More
+
+See the [CLI reference](https://github.com/fractalops/yappr/blob/main/docs/reference.md)
+for command options and delivery behavior.
+For local builds, tests, and source layout, see [Contributing](CONTRIBUTING.md).
