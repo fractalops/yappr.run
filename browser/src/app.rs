@@ -21,7 +21,7 @@ use yappr::{
     entry::Entry,
     health::{self, Health},
     net::{self, RelaySettings},
-    pairing::{self, Invitation},
+    pairing::{self, Invitation, MachineCode},
     proto::{Frame, Request},
     EndpointTicket,
 };
@@ -40,6 +40,9 @@ struct WriterView {
     enabled: bool,
     /// The machine has a delivery connection open to this page.
     delivering: bool,
+    /// The page takes only deliveries from this machine, see
+    /// `Reader::delivers_only`.
+    delivers_only: bool,
     health: Health,
 }
 #[derive(Debug, Clone, Serialize)]
@@ -111,6 +114,8 @@ struct AppState {
 #[derive(Debug, Clone, Serialize)]
 struct Row {
     ms: i64,
+    /// The log of the entry. Entry ids repeat in another log of a machine.
+    log: String,
     entry: Entry,
 }
 /// The most entries that the page saves in one step while a machine sends
@@ -144,7 +149,10 @@ async fn book(state: &AppState) -> Result<Readers, String> {
             if writer.entries.is_empty() {
                 continue;
             }
-            entries::save(id, &writer.entries).await.map_err(err)?;
+            let log = writer.log.clone().unwrap_or_default();
+            entries::save(id, &log, &writer.entries, &[])
+                .await
+                .map_err(err)?;
             let last = writer.entries.iter().map(|e| e.id).max().unwrap_or(0);
             writer.last_id = writer.last_id.max(last);
             writer.entries.clear();
@@ -152,6 +160,13 @@ async fn book(state: &AppState) -> Result<Readers, String> {
         }
         if moved {
             readers.save(&Dir).map_err(err)?;
+        }
+        // Entries from before logs in IndexedDB have an empty log. They
+        // belong to the current log of their machine.
+        for (id, writer) in &readers.writers {
+            if let Some(log) = &writer.log {
+                entries::rename_log(id, "", log).await.map_err(err)?;
+            }
         }
         *slot = Some(readers);
     }
@@ -223,12 +238,13 @@ async fn view(state: &AppState) -> Result<View, String> {
         .into_iter()
         .map(|(id, writer)| WriterView {
             health: health.get(&id).cloned().unwrap_or_else(|| {
-                Health::state(if writer.enabled {
-                    "connecting"
-                } else {
-                    "paused"
+                Health::state(match (writer.enabled, writer.delivers_only) {
+                    (false, _) => "paused",
+                    (true, true) => "waiting",
+                    (true, false) => "connecting",
                 })
             }),
+            delivers_only: writer.delivers_only,
             delivering: delivering.contains_key(&id),
             questions: states.remove(&id).unwrap_or_default(),
             id,
@@ -307,7 +323,13 @@ async fn resume_all(app: AppHandle, state: Arc<AppState>) -> Result<(), String> 
         runtime(&app, &state).await?;
         start_worker(app.clone(), state.clone()).await;
     }
-    for (id, writer) in book.writers.into_iter().filter(|(_, w)| w.enabled) {
+    // The page reads the feed of each enabled machine, but not of a machine
+    // that only delivers.
+    for (id, writer) in book
+        .writers
+        .into_iter()
+        .filter(|(_, w)| w.enabled && !w.delivers_only)
+    {
         let active = state
             .tasks
             .lock()
@@ -392,17 +414,16 @@ async fn save_entries(
         return Ok(());
     }
     let _saving = state.saving.lock().await;
-    if update(state, |book| {
+    update(state, |book| {
         book.set_log(id, log.map(String::from)).map_err(err)
     })
-    .await?
-    {
-        entries::clear(id).await.map_err(err)?;
-        if let Some(all) = state.trackers.lock().await.as_mut() {
-            all.insert(id.into(), Tracker::default());
-        }
-    }
+    .await?;
     let readers = book(state).await?;
+    let log = readers
+        .writers
+        .get(id)
+        .and_then(|w| w.log.clone())
+        .unwrap_or_default();
     let mut new = Vec::new();
     for entry in batch {
         if readers.is_new(id, &entry).map_err(err)?
@@ -417,8 +438,15 @@ async fn save_entries(
     // Build the question states from the saved entries before these entries
     // are saved, so that the tracker gets each entry once.
     questions(state, id).await?;
-    entries::save(id, &new).await.map_err(err)?;
-    update(state, |book| book.saved(id, last).map_err(err)).await?;
+    entries::save(id, &log, &new, &[]).await.map_err(err)?;
+    let drop = update(state, |book| {
+        book.saved(id, last).map_err(err)?;
+        Ok(book.trim(id))
+    })
+    .await?;
+    if !drop.is_empty() {
+        entries::save(id, &log, &[], &drop).await.map_err(err)?;
+    }
     let states = {
         let mut slot = state.trackers.lock().await;
         let tracker = slot
@@ -437,6 +465,7 @@ async fn save_entries(
             .into_iter()
             .map(|entry| Row {
                 ms: entry.time.as_millisecond(),
+                log: log.clone(),
                 entry,
             })
             .collect(),
@@ -654,17 +683,21 @@ async fn set_writer_enabled(
     enabled: bool,
 ) -> Result<View, String> {
     let _guard = state.lifecycle.lock().await;
-    let ticket = update(&state, |book| {
+    let (ticket, delivers_only) = update(&state, |book| {
         let writer = book
             .writers
             .get_mut(&writer_id)
             .ok_or("The machine does not exist")?;
         writer.enabled = enabled;
-        Ok(writer.ticket.clone())
+        Ok((writer.ticket.clone(), writer.delivers_only))
     })
     .await?;
     if enabled {
-        start_follow(app.clone(), state.clone(), ticket.parse().map_err(err)?).await;
+        if delivers_only {
+            set_health(&app, &state, &writer_id, Health::state("waiting")).await;
+        } else {
+            start_follow(app.clone(), state.clone(), ticket.parse().map_err(err)?).await;
+        }
         start_worker(app.clone(), state.clone()).await;
         state.wake.notify_one();
     } else {
@@ -921,6 +954,33 @@ async fn start_pair(app: AppHandle, state: Arc<AppState>, pair: PendingPair) {
     });
     *state.pair_task.lock().await = Some(task);
 }
+/// Allow the machine of a machine code, such as a CI job, to deliver to this
+/// page. The page does not read its feed.
+async fn allow_machine(
+    app: AppHandle,
+    state: Arc<AppState>,
+    code: String,
+    name: Option<String>,
+) -> Result<View, String> {
+    let _guard = state.lifecycle.lock().await;
+    let machine = MachineCode::decode(&code).map_err(err)?;
+    let name = name.unwrap_or(machine.name);
+    update(&state, |book| {
+        book.allow_machine(machine.id, name).map_err(err)
+    })
+    .await?;
+    if let Some(all) = state.trackers.lock().await.as_mut() {
+        all.entry(machine.id.to_string()).or_default();
+    }
+    // The page takes deliveries while its endpoint runs.
+    runtime(&app, &state).await?;
+    start_worker(app.clone(), state.clone()).await;
+    let result = view(&state).await?;
+    app.emit(UiEvent::View {
+        view: result.clone(),
+    });
+    Ok(result)
+}
 async fn stop(app: AppHandle, state: Arc<AppState>) -> Result<(), String> {
     let _guard = state.lifecycle.lock().await;
     abort(state.pair_task.lock().await.take()).await;
@@ -997,6 +1057,11 @@ struct PageArgs {
     writer_id: Option<String>,
 }
 #[derive(Deserialize)]
+struct MachineArgs {
+    code: String,
+    name: Option<String>,
+}
+#[derive(Deserialize)]
 struct InvitationArgs {
     invitation: String,
 }
@@ -1063,6 +1128,15 @@ async fn call(
         "choose" => {
             let a: ChooseArgs = args(value)?;
             json(choose(app, state, a.writer_id, a.question_id, a.value).await)
+        }
+        "preview_machine" => {
+            let a: MachineArgs = args(value)?;
+            let machine = MachineCode::decode(&a.code).map_err(err)?;
+            Ok(serde_json::json!({"name": machine.name, "writer_id": machine.id.to_string()}))
+        }
+        "allow_machine" => {
+            let a: MachineArgs = args(value)?;
+            json(allow_machine(app, state, a.code, a.name).await)
         }
         "preview_invitation" => {
             let a: InvitationArgs = args(value)?;

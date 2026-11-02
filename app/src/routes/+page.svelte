@@ -11,17 +11,17 @@
     responder: string; expires_at: string | null; approval: boolean }; status: string; decision: { value: string; responder: string } | null };
   type Delivery = { decision?:Question["decision"]; ticket: string; writer: string; submission: { question_id: string; value: string }; status: string; error: string | null };
   type Health = { state: string; route: string | null; address: string | null; rtt_ms: number | null; error: string | null; retry_in_ms: number | null };
-  type Writer = { id: string; name: string; ticket: string; log: string | null; last_id: number; questions: Question[]; enabled: boolean; delivering: boolean; health: Health };
+  type Writer = { id: string; name: string; ticket: string; log: string | null; last_id: number; questions: Question[]; enabled: boolean; delivering: boolean; delivers_only: boolean; health: Health };
   // One saved entry and its place in the feed: time, machine, id.
-  type Row = { writer: string; ms: number; entry: Entry };
+  type Row = { writer: string; log: string; ms: number; entry: Entry };
   type Network = { disabled: boolean; urls: string[] };
   type View = { device_id: string; writers: Writer[]; selected: string | null; deliveries: Delivery[];
     pairing: boolean; pairing_code: string | null; pairing_name: string | null; network: Network };
-  type Preview = { name: string; writer_id: string; expires_at: string|null; ticket?:string };
+  type Preview = { name: string; writer_id: string; expires_at: string|null; ticket?:string; machine?:string };
   type FeedEvent = { type: "view"; view: View } | { type: "status"; text: string } | { type: "pair_failed"; message: string }
     | { type: "pair_state"; state: "sending" | "waiting" | "retrying" }
     | { type: "health"; writer_id: string; health: Health }
-    | { type: "entries"; writer_id: string; rows: { ms: number; entry: Entry }[]; questions: Question[] };
+    | { type: "entries"; writer_id: string; rows: { ms: number; log: string; entry: Entry }[]; questions: Question[] };
   // The page loads the feed in parts of this many entries, newest first.
   const PAGE = 100;
 
@@ -64,16 +64,22 @@
   let rows = $state<Row[]>([]);
   let older = $state(false);
   let loading = $state(false);
-  // The place of a row: newest first, then by machine and id, as in storage.
+  // The place of a row: newest first, then by machine, log, and id, as in
+  // storage.
   function before(a: Row, b: Row): boolean {
-    return a.ms !== b.ms ? a.ms > b.ms : a.writer !== b.writer ? a.writer > b.writer : a.entry.id > b.entry.id;
+    if (a.ms !== b.ms) return a.ms > b.ms;
+    if (a.writer !== b.writer) return a.writer > b.writer;
+    if (a.log !== b.log) return a.log > b.log;
+    return a.entry.id > b.entry.id;
   }
+  // An entry id repeats in another log of a machine, so the key has the log.
+  const rowKey = (r: Row) => `${r.writer}:${r.log}:${r.entry.id}`;
   // Add new rows in their places. While older rows are not loaded, rows that
   // belong after the last loaded row wait for "Show older entries".
   function merged(old: Row[], add: Row[]): Row[] {
-    const keys = new Set(old.map((r) => `${r.writer}:${r.entry.id}`));
+    const keys = new Set(old.map(rowKey));
     const last = old.at(-1);
-    const fresh = add.filter((r) => !keys.has(`${r.writer}:${r.entry.id}`) && (!older || !last || before(r, last)));
+    const fresh = add.filter((r) => !keys.has(rowKey(r)) && (!older || !last || before(r, last)));
     const all = [...old, ...fresh].sort((a, b) => (before(a, b) ? -1 : 1));
     // A long catch-up shows its newest page; the rest is one click away.
     if (all.length > Math.max(old.length, PAGE)) { older = true; return all.slice(0, Math.max(old.length, PAGE)); }
@@ -84,7 +90,7 @@
     loading = true;
     try {
       const last = reset ? null : rows.at(-1);
-      const page = await invoke<Row[]>("entries", { before: last ? [last.ms, last.writer, last.entry.id] : null,
+      const page = await invoke<Row[]>("entries", { before: last ? [last.ms, last.writer, last.log, last.entry.id] : null,
         limit: PAGE, writerId: selectedMachine || null });
       rows = reset ? page : [...rows, ...page];
       older = page.length === PAGE;
@@ -92,7 +98,7 @@
     finally { loading = false; }
   }
 
-  type FeedItem = { key: string; writer: Writer; entry: Entry; question?: Question };
+  type FeedItem = { key: string; writer: Writer; log: string; entry: Entry; question?: Question };
   const machines = $derived(view.writers.map(w=>({id:w.id,name:w.name})));
   const selectedWriters = $derived(view.writers.filter((w) => !selectedMachine || w.id === selectedMachine));
   const feed = $derived.by(() => {
@@ -111,7 +117,7 @@
         if (seen.has(subject)) return [];
         seen.add(subject);
       }
-      return [{ key: `${writer.id}:${entry.id}`, writer, entry,
+      return [{ key: rowKey(row), writer, log: row.log, entry,
         question: entry.choices?.type === "question" ? questions.get(`${writer.id}:${entry.choices.question?.id ?? ""}`) : undefined }];
     });
   });
@@ -125,7 +131,7 @@
 
   function healthLabel(health: Health): string {
     if (health.state === "connected") return `${health.route === "relay" ? "Relay" : health.route === "direct" ? "Direct" : "Connected"}${health.rtt_ms !== null ? ` · ${Math.round(health.rtt_ms)} ms` : ""}`;
-    const labels: Record<string, string> = { connecting: "Connecting", reconnecting: "Reconnecting", offline: "Offline", denied: "Access denied", paused: "Paused", disconnected: "Disconnected", stopped: "Stopped" };
+    const labels: Record<string, string> = { connecting: "Connecting", reconnecting: "Reconnecting", offline: "Offline", waiting: "Waiting for deliveries", denied: "Access denied", paused: "Paused", disconnected: "Disconnected", stopped: "Stopped" };
     return labels[health.state] ?? health.state;
   }
   // A machine that delivers to this page is connected, also when the page
@@ -156,7 +162,7 @@
   }
   // The entry with its machine and log, which a program needs to check the signature.
   function copySigned(item:FeedItem) {
-    void copy(JSON.stringify({writer:item.writer.id,log:item.writer.log,entry:item.entry}),`${item.key}:signed`);
+    void copy(JSON.stringify({writer:item.writer.id,log:item.log,entry:item.entry}),`${item.key}:signed`);
   }
   async function toggleWriter(writer: Writer) {
     try { view = await invoke<View>("set_writer_enabled", { writerId: writer.id, enabled: !writer.enabled }); }
@@ -258,7 +264,11 @@
     error='';
     code=value.trim();preview=null;followSuccess='';
     try {
-      if(/^yappr:/i.test(code))preview=await invoke<Preview>('preview_invitation',{invitation:code});
+      if(/^yappr-machine:/i.test(code)) {
+        const details=await invoke<{name:string;writer_id:string}>('preview_machine',{code});
+        machineName=details.name;preview={name:details.name,writer_id:details.writer_id,expires_at:null,machine:code};
+      }
+      else if(/^yappr:/i.test(code))preview=await invoke<Preview>('preview_invitation',{invitation:code});
       else {
         const details=await invoke<{writer_id:string}>('preview_feed',{ticket:code});
         machineName='My computer';preview={name:machineName,writer_id:details.writer_id,expires_at:null,ticket:code};
@@ -268,6 +278,10 @@
   async function requestPair() {
     if(!preview)return;
     error='';
+    if(preview.machine) {
+      try{view=await invoke<View>('allow_machine',{code:preview.machine,name:machineName.trim()||null});followSuccess=machineName.trim();preview=null;}catch(e){error=String(e);}
+      return;
+    }
     if(preview.ticket) {
       try{view=await invoke<View>('follow',{ticket:preview.ticket,name:machineName.trim()||null});followSuccess=machineName.trim()||'Computer';preview=null;}catch(e){error=String(e);}
       return;
@@ -384,15 +398,16 @@
           </div>
           {#if pairStep!=='approved'}<code class="identity">{shortId(view.device_id)}</code><p class="hint">Compare this ID with the computer's terminal.</p><button class="quiet" onclick={async()=>{await invoke('stop');pairing=false;pairStep='idle';}}>Use another code</button>{/if}
         {:else if preview}
-          <p class="step-label">3. Confirm the computer</p><p class="hint">{preview.name} · <code title={preview.writer_id}>{shortId(preview.writer_id)}</code></p>
-          {#if preview.ticket}<label for="machine-name">Computer name</label><input id="machine-name" bind:value={machineName} maxlength="80"/>
+          <p class="step-label">3. Confirm the {preview.machine?'machine':'computer'}</p><p class="hint">{preview.name} · <code title={preview.writer_id}>{shortId(preview.writer_id)}</code></p>
+          {#if preview.machine}<label for="machine-name">Machine name</label><input id="machine-name" bind:value={machineName} maxlength="80"/><p class="hint">This machine can send entries and questions to this device. It cannot read anything here.</p>
+          {:else if preview.ticket}<label for="machine-name">Computer name</label><input id="machine-name" bind:value={machineName} maxlength="80"/>
           {:else}<label for="device-name">Your device name</label><input id="device-name" bind:value={name} maxlength="64"/><p class="hint">The computer must approve your request.{#if preview.expires_at} This code expires {when(preview.expires_at)}.{/if}</p>{/if}
-          <div class="confirm-actions"><button class="option" onclick={requestPair} disabled={preview.ticket?!machineName.trim():!name.trim()}>{preview.ticket?'Follow this feed':'Request pairing'}</button><button class="quiet" onclick={()=>preview=null}>Use another code</button></div>
+          <div class="confirm-actions"><button class="option" onclick={requestPair} disabled={preview.machine||preview.ticket?!machineName.trim():!name.trim()}>{preview.machine?'Allow machine':preview.ticket?'Follow this feed':'Request pairing'}</button><button class="quiet" onclick={()=>preview=null}>Use another code</button></div>
         {:else}
           {#if followSuccess}<p class="connection-success" role="status">Connected to {followSuccess}.</p>{/if}
           <p class="step-label">1. On your computer</p><pre class="setup-command">yappr start --pair</pre>
           <p class="hint">It shows a pairing code. Keep it running.</p><p class="step-label">2. Read its code</p>
-          <CodeInput oncode={readCode} disabled={!readerReady} label="Pairing code or feed ticket" imageLabel="Import a pairing QR image"/>
+          <CodeInput oncode={readCode} disabled={!readerReady} label="Pairing code, machine code, or feed ticket" imageLabel="Import a pairing QR image"/>
         {/if}
       </div>
     </section>

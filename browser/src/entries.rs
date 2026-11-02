@@ -4,18 +4,22 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 use yappr::entry::Entry;
 
-/// The most entries that the page keeps for one machine. A new entry removes
-/// the oldest entry above this number.
-pub const LIMIT: u64 = 5000;
+use crate::readers::LIMIT;
 
 #[wasm_bindgen(module = "/src/entry_store.js")]
 extern "C" {
     #[wasm_bindgen(catch, js_name = putEntries)]
-    async fn put_entries(writer: &str, json: &str, keep_from: f64) -> Result<(), JsValue>;
+    async fn put_entries(
+        writer: &str,
+        log: &str,
+        json: &str,
+        keep_from: f64,
+        drop: &str,
+    ) -> Result<(), JsValue>;
+    #[wasm_bindgen(catch, js_name = moveLog)]
+    async fn move_log(writer: &str, from: &str, to: &str) -> Result<(), JsValue>;
     #[wasm_bindgen(catch, js_name = writerEntries)]
     async fn writer_entries(writer: &str) -> Result<JsValue, JsValue>;
-    #[wasm_bindgen(catch, js_name = clearWriter)]
-    async fn clear_writer(writer: &str) -> Result<(), JsValue>;
     #[wasm_bindgen(catch, js_name = page)]
     async fn page_of(before: &str, limit: u32, writer: &str) -> Result<JsValue, JsValue>;
 }
@@ -33,9 +37,10 @@ struct Record<'a> {
     entry: &'a Entry,
 }
 
-/// Save `entries` of `writer`, and keep at most [`LIMIT`] of its entries.
-/// Returns when the browser has the entries on disk.
-pub async fn save(writer: &str, entries: &[Entry]) -> Result<()> {
+/// Save `entries` of the log `log` of `writer`. Keep at most [`LIMIT`]
+/// entries of that log, and remove the logs in `drop`. Returns when the
+/// browser has the entries on disk.
+pub async fn save(writer: &str, log: &str, entries: &[Entry], drop: &[String]) -> Result<()> {
     let Some(last) = entries.iter().map(|e| e.id).max() else {
         return Ok(());
     };
@@ -47,9 +52,15 @@ pub async fn save(writer: &str, entries: &[Entry]) -> Result<()> {
         })
         .collect();
     let keep_from = (last + 1).saturating_sub(LIMIT);
-    put_entries(writer, &serde_json::to_string(&records)?, keep_from as f64)
-        .await
-        .map_err(js)
+    put_entries(
+        writer,
+        log,
+        &serde_json::to_string(&records)?,
+        keep_from as f64,
+        &serde_json::to_string(drop)?,
+    )
+    .await
+    .map_err(js)
 }
 
 /// All saved entries of `writer`, in id order.
@@ -58,9 +69,9 @@ pub async fn all(writer: &str) -> Result<Vec<Entry>> {
     Ok(serde_json::from_str(&json.as_string().unwrap_or_default())?)
 }
 
-/// Remove all saved entries of `writer`.
-pub async fn clear(writer: &str) -> Result<()> {
-    clear_writer(writer).await.map_err(js)
+/// Move the entries of the log `from` of `writer` to the log `to`.
+pub async fn rename_log(writer: &str, from: &str, to: &str) -> Result<()> {
+    move_log(writer, from, to).await.map_err(js)
 }
 
 /// Up to `limit` entries before the place `before`, newest first, as JSON.

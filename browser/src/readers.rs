@@ -12,6 +12,9 @@ fn enabled() -> bool {
 
 /// The most machines that one page reads.
 const MAX_WRITERS: usize = 32;
+/// The most entries that the page keeps for one machine, in all its logs. A
+/// new entry removes the oldest entries above this number.
+pub const LIMIT: u64 = 5000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Reader {
@@ -24,13 +27,27 @@ pub struct Reader {
     /// moves them to IndexedDB once.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entries: Vec<Entry>,
-    /// The name of the machine's log, see `yappr::store`. Entries from
-    /// before log names have none.
+    /// The name of the machine's current log, see `yappr::store`. Entries
+    /// from before log names have none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log: Option<String>,
+    /// The earlier logs of the machine that the page keeps, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub old_logs: Vec<OldLog>,
+    /// The page does not read the feed of this machine. It takes only the
+    /// deliveries of the machine, such as a CI job that it allowed by key.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub delivers_only: bool,
     /// A paused machine is not read, and its deliveries are refused.
     #[serde(default = "enabled")]
     pub enabled: bool,
+}
+
+/// An earlier log of a machine, and the id of its last saved entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OldLog {
+    pub log: String,
+    pub last_id: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +101,8 @@ impl Readers {
             last_id: 0,
             entries: Vec::new(),
             log: None,
+            old_logs: Vec::new(),
+            delivers_only: false,
             enabled: true,
         });
         writer.ticket = ticket.to_string();
@@ -95,22 +114,55 @@ impl Readers {
         Ok(id)
     }
 
-    /// Save the name of the machine's log. Returns true when a new log
-    /// replaces the saved history, because its entry ids start again at 1.
-    pub fn set_log(&mut self, writer: &str, log: Option<String>) -> Result<bool> {
+    /// Add a machine that the page allows by its key, such as a CI job. The
+    /// page takes its deliveries and does not read its feed.
+    pub fn allow_machine(&mut self, id: iroh::EndpointId, name: String) -> Result<String> {
+        validate_name(&name)?;
+        let ticket = EndpointTicket::new(iroh::EndpointAddr::new(id));
+        let key = self.add(&ticket, Some(name))?;
+        self.writers
+            .get_mut(&key)
+            .expect("added machine")
+            .delivers_only = true;
+        Ok(key)
+    }
+
+    /// Save the name of the machine's current log. A new log starts at entry
+    /// 1, and the page keeps the entries of the earlier log.
+    pub fn set_log(&mut self, writer: &str, log: Option<String>) -> Result<()> {
         let reader = self
             .writers
             .get_mut(writer)
             .context("the machine does not exist")?;
         if log.is_none() || reader.log == log {
-            return Ok(false);
+            return Ok(());
         }
-        let reset = reader.log.is_some();
-        if reset {
+        if let Some(old) = reader.log.take() {
+            reader.old_logs.push(OldLog {
+                log: old,
+                last_id: reader.last_id,
+            });
             reader.last_id = 0;
         }
         reader.log = log;
-        Ok(reset)
+        Ok(())
+    }
+
+    /// The earlier logs to remove, oldest first, so that the machine keeps
+    /// at most [`LIMIT`] entries. They leave the book.
+    pub fn trim(&mut self, writer: &str) -> Vec<String> {
+        let Some(reader) = self.writers.get_mut(writer) else {
+            return Vec::new();
+        };
+        let mut total =
+            reader.last_id.min(LIMIT) + reader.old_logs.iter().map(|l| l.last_id).sum::<u64>();
+        let mut drop = Vec::new();
+        while total > LIMIT && !reader.old_logs.is_empty() {
+            let old = reader.old_logs.remove(0);
+            total -= old.last_id;
+            drop.push(old.log);
+        }
+        drop
     }
 
     /// True if `entry` is new: its id is after the last saved id. A machine
@@ -173,16 +225,39 @@ mod tests {
     }
 
     #[test]
-    fn a_new_log_starts_the_history_again() {
+    fn a_new_log_keeps_the_earlier_logs_until_the_limit() {
         let mut readers = Readers::default();
         let id = readers.add(&ticket(), None).unwrap();
-        assert!(!readers.set_log(&id, Some("a".into())).unwrap());
+        readers.set_log(&id, Some("a".into())).unwrap();
         readers.saved(&id, 5).unwrap();
-        assert!(!readers.set_log(&id, None).unwrap());
-        assert!(!readers.set_log(&id, Some("a".into())).unwrap());
+        readers.set_log(&id, None).unwrap();
+        readers.set_log(&id, Some("a".into())).unwrap();
         assert_eq!(readers.writers[&id].last_id, 5);
-        assert!(readers.set_log(&id, Some("b".into())).unwrap());
+        readers.set_log(&id, Some("b".into())).unwrap();
         assert_eq!(readers.writers[&id].last_id, 0);
+        assert_eq!(
+            readers.writers[&id].old_logs,
+            [OldLog {
+                log: "a".into(),
+                last_id: 5
+            }]
+        );
         assert!(readers.is_new(&id, &entry(1, "new")).unwrap());
+        assert!(readers.trim(&id).is_empty());
+        readers.saved(&id, LIMIT).unwrap();
+        assert_eq!(readers.trim(&id), ["a"]);
+        assert!(readers.writers[&id].old_logs.is_empty());
+    }
+
+    #[test]
+    fn a_machine_allowed_by_key_only_delivers() {
+        let mut readers = Readers::default();
+        let key = iroh::SecretKey::generate().public();
+        let id = readers.allow_machine(key, "CI deploys".into()).unwrap();
+        assert_eq!(id, key.to_string());
+        assert!(readers.writers[&id].delivers_only);
+        assert_eq!(readers.writers[&id].name, "CI deploys");
+        readers.validate().unwrap();
+        assert!(readers.allow_machine(key, "\u{1b}".into()).is_err());
     }
 }
