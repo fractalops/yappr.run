@@ -378,7 +378,7 @@
   </svg>
 {/snippet}
 
-<svelte:head><title>Yappr</title><meta name="description" content="Updates and questions from your machines in one feed." /></svelte:head>
+<svelte:head><title>Yappr</title></svelte:head>
 
 <main>
   <header class="topbar"><a class="brand" href={resolve("/")} aria-label="Yappr home">{@render glyph(28)} Yappr</a></header>
