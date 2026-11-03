@@ -58,6 +58,11 @@
   let sending = $state<Record<string, { value: string; label: string; at: number }>>({});
   const sendTimers = new Map<string, ReturnType<typeof setTimeout>>();
   let now = $state(Date.now());
+  // The last time that each machine delivered to this page, since the page loaded.
+  let deliveredAt = $state<Record<string, string>>({});
+  $effect(() => {
+    for (const w of view.writers) if (w.delivering) deliveredAt[w.id] = new Date().toISOString();
+  });
   const hasConnections=$derived(view.writers.length>0);
   const hasHistory=$derived(view.writers.some(w=>w.last_id>0));
   // The loaded entries, newest first, and whether older entries can exist.
@@ -135,10 +140,15 @@
     return labels[health.state] ?? health.state;
   }
   // A machine that delivers to this page is connected, also when the page
-  // cannot reach it.
+  // cannot reach it. After a delivery, the label shows when it was.
   function writerLabel(writer: Writer): string {
     if (!writer.enabled) return "Paused";
-    return writer.delivering && writer.health.state !== "connected" ? "Delivering" : healthLabel(writer.health);
+    if (writer.health.state === "connected") return healthLabel(writer.health);
+    if (writer.delivering) return "Delivering";
+    const delivered = deliveredAt[writer.id];
+    if (!delivered || !["offline", "reconnecting", "connecting", "waiting"].includes(writer.health.state)) return healthLabel(writer.health);
+    if (writer.health.state === "waiting") return `Last delivery ${clock(delivered)}`;
+    return `${healthLabel(writer.health)} · last delivery ${clock(delivered)}`;
   }
   function openDevice() { screen='devices'; }
   function switchTab(event:KeyboardEvent) {
@@ -492,7 +502,7 @@
             {#if entry.title}<p class="title">{entry.title}</p>{/if}
           </div>
           <div class="row-content" id={`entry-${item.key}`}>
-            {#if entry.body && (isExpanded || !q || state === "pending")}
+            {#if entry.body && (isExpanded || !q || state !== "answered")}
               {#if entry.format === "markdown"}
                 <div class="body markdown" class:clamped={!isExpanded}>{@html renderMarkdown(entry.body)}</div>
               {:else}
