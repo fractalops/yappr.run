@@ -112,8 +112,13 @@ test("post and ask deliver to the page when start does not run", async ({ page }
   await answer(page, "Retry the backup?", "no");
   const status = JSON.parse((await cli("status", "--output", "json")).stdout);
   expect(status.peers[0].receives).toBe(true);
+  // A question that nobody answers keeps its text when it expires.
+  await cli("approve", "my-browser", "Run the migration?", "--body", "psql -f migrate.sql", "--timeout", "10s", "--no-wait");
+  await expect(page.getByText("Expired", { exact: true })).toBeVisible();
+  await expect(page.getByText("psql -f migrate.sql", { exact: true })).toBeVisible();
   // With no start, the page cannot reach the machine: offline, not reconnecting.
-  await expect(page.getByRole("button", { name: "Connection: Offline. Open setup", exact: true })).toBeVisible({ timeout: 90_000 });
+  // The label also shows the last delivery.
+  await expect(page.getByRole("button", { name: /^Connection: Offline · last delivery .+\. Open setup$/ })).toBeVisible({ timeout: 90_000 });
   await page.getByRole("tab", { name: "Setup", exact: true }).click();
   await expect(page.getByText("This device cannot reach it.")).toBeVisible();
 });
