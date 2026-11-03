@@ -1,6 +1,6 @@
 <script lang="ts">
-  import {scan} from '$lib/scan';
-  import {decodeQr} from '$lib/qr';
+  import {scan} from '#lib/scan.ts';
+  import {decodeQr} from '#lib/qr.ts';
   let {oncode,disabled=false,label='Connection code',imageLabel='Import a connection QR image'}:{oncode:(value:string)=>void|Promise<void>;disabled?:boolean;label?:string;imageLabel?:string}=$props();
   let paste=$state(false),code=$state(''),failure=$state(''),working=$state(false),input=$state<HTMLInputElement>();
   async function submit(value:string){failure='';working=true;try{await oncode(value.trim());}catch(e){failure=String(e);}finally{working=false;}}

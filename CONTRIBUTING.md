@@ -22,6 +22,7 @@ Then open `http://127.0.0.1:8088`. Set `YAPPR_BASE` to build for a site under a 
 ```sh
 cargo test -p yappr-browser --target "$(rustc -vV | sed -n 's/host: //p')"
 pnpm --dir app check
+pnpm --dir app test
 YAPPR_BIN=/path/to/yappr pnpm --dir app test:e2e
 ```
 
