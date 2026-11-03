@@ -1,9 +1,9 @@
 <script lang="ts">
-  import CodeInput from "$lib/CodeInput.svelte";
-  import { invoke, listen } from "$lib/reader";
+  import CodeInput from "#lib/CodeInput.svelte";
+  import { invoke, listen } from "#lib/reader.ts";
   import { onMount, tick } from "svelte";
-  import { base } from "$app/paths";
-  import { linkSegments, renderMarkdown } from "$lib/body";
+  import { resolve } from "$app/paths";
+  import { linkSegments, renderMarkdown } from "#lib/body.ts";
 
   type Entry = { id: number; time: string; source: string; kind: string; level?: string; subject?: string; title?: string; body: string;
     format?: string; data?: Record<string, unknown>; sig?: string; choices?: { type?: string; question?: { id: string } } };
@@ -381,7 +381,7 @@
 <svelte:head><title>Yappr</title><meta name="description" content="Updates and questions from your machines in one feed." /></svelte:head>
 
 <main>
-  <header class="topbar"><a class="brand" href="{base}/" aria-label="Yappr home">{@render glyph(28)} Yappr</a></header>
+  <header class="topbar"><a class="brand" href={resolve("/")} aria-label="Yappr home">{@render glyph(28)} Yappr</a></header>
   <div class="app-tabs" role="tablist" aria-label="App views">
     <button role="tab" id="feed-tab" aria-controls="feed-panel" aria-selected={screen==='feed'} tabindex={screen==='feed'?0:-1} onclick={()=>screen='feed'} onkeydown={switchTab}>Feed</button>
     <button role="tab" id="devices-tab" aria-controls="devices-panel" aria-selected={screen==='devices'} tabindex={screen==='devices'?0:-1} onclick={()=>screen='devices'} onkeydown={switchTab}>Setup</button>

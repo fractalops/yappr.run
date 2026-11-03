@@ -88,6 +88,7 @@ jobs:
           cargo install --locked --git https://github.com/fractalops/yappr --rev "$rev" yappr
       - run: pnpm --dir app install --frozen-lockfile
       - run: pnpm --dir app check
+      - run: pnpm --dir app test
       - run: ./scripts/build.sh
       - name: Install Chromium
         run: pnpm --dir app exec playwright install --with-deps chromium

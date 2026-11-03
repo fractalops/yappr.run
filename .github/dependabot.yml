@@ -27,6 +27,11 @@ updates:
         update-types:
           - minor
           - patch
+    # SvelteKit and svelte-check use the JavaScript API of TypeScript, which
+    # TypeScript 7 does not have.
+    ignore:
+      - dependency-name: typescript
+        versions: [">=7"]
 
   - package-ecosystem: github-actions
     directory: /
