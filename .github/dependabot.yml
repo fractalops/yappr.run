@@ -18,10 +18,15 @@ updates:
     directory: /app
     schedule:
       interval: weekly
+    # Major updates come one per pull request, because they can need changes
+    # to the app.
     groups:
       npm:
         patterns:
           - "*"
+        update-types:
+          - minor
+          - patch
 
   - package-ecosystem: github-actions
     directory: /
