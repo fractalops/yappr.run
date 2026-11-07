@@ -51,3 +51,10 @@ export async function listen<T>(handler: (payload: T) => void): Promise<() => vo
   handlers.add(handler as Handler);
   return () => handlers.delete(handler as Handler);
 }
+
+// Copy text after a user selects a copy action.
+export async function copyText(text: string): Promise<void> {
+  await navigator.clipboard.writeText(text);
+}
+
+export const deviceName = "My browser";

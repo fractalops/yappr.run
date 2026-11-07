@@ -1,5 +1,4 @@
-//! The machines that this page reads. Their entries are in IndexedDB, see
-//! `entries.rs`.
+//! Saved machines and their delivery cursors. Entries use platform storage.
 use std::collections::BTreeMap;
 
 use anyhow::{bail, Context, Result};

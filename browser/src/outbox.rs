@@ -22,8 +22,8 @@ pub struct Delivery {
     pub error: Option<String>,
 }
 
-pub fn list(_: &Dir) -> Result<Vec<Delivery>> {
-    storage::read(KEY)
+pub fn list(dir: &Dir) -> Result<Vec<Delivery>> {
+    storage::read(dir, KEY)
 }
 
 pub fn queue(
@@ -35,6 +35,7 @@ pub fn queue(
     if !choices::valid_id(&question_id) {
         bail!("the question ID is not valid");
     }
+    let _guard = storage::lock_outbox(dir)?;
     let mut deliveries = list(dir)?;
     let writer = ticket.endpoint_addr().id.to_string();
     if let Some(delivery) = deliveries.iter().find(|d| {
@@ -58,7 +59,7 @@ pub fn queue(
         error: None,
     };
     deliveries.push(delivery.clone());
-    storage::write(KEY, &deliveries)?;
+    storage::write(dir, KEY, &deliveries)?;
     Ok(delivery)
 }
 
@@ -87,6 +88,7 @@ pub async fn deliver_with(
         }
     };
     // Read again after the request, because another task can change the list.
+    let _guard = storage::lock_outbox(dir)?;
     let mut deliveries = list(dir)?;
     let saved = deliveries
         .iter_mut()
@@ -104,7 +106,7 @@ pub async fn deliver_with(
             saved.status = "delivered".into();
             saved.decision = Some(decision.clone());
             saved.error = None;
-            storage::write(KEY, &deliveries)?;
+            storage::write(dir, KEY, &deliveries)?;
             Ok(decision)
         }
         Err(error) => {
@@ -115,7 +117,7 @@ pub async fn deliver_with(
                 saved.status = "rejected".into();
             }
             saved.error = Some(format!("{error:#}"));
-            storage::write(KEY, &deliveries)?;
+            storage::write(dir, KEY, &deliveries)?;
             Err(error)
         }
     }

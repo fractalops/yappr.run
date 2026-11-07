@@ -26,6 +26,16 @@ pnpm --dir app test
 YAPPR_BIN=/path/to/yappr pnpm --dir app test:e2e
 ```
 
+Run the IndexedDB regression in a browser:
+
+```sh
+NO_HEADLESS=1 CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \
+  cargo test -p yappr-browser --target wasm32-unknown-unknown --lib entries::tests
+```
+
+Open the local URL that the runner prints. Stop the runner after the result appears.
+On macOS, set `CC_wasm32_unknown_unknown=/opt/homebrew/opt/llvm/bin/clang` if needed.
+
 The browser tests pair a page with the CLI and use the public [relays](https://docs.iroh.computer/concepts/relays), so they need internet access.
 
 ## Source layout
