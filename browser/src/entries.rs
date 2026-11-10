@@ -99,12 +99,12 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn empty_save_drops_old_logs_without_changing_other_logs() {
-        let dir = Dir::default();
+        let dir = Dir;
         let entry: Entry = serde_json::from_value(serde_json::json!({
             "v":1,"id":1,"time":"2026-11-01T10:00:00Z","source":"test","kind":"event","body":"saved"
         }))
         .unwrap();
-        save(&dir, "drop-test", "old", &[entry.clone()], &[])
+        save(&dir, "drop-test", "old", std::slice::from_ref(&entry), &[])
             .await
             .unwrap();
         save(&dir, "drop-test", "current", &[entry], &[])
