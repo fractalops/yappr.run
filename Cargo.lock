@@ -4604,10 +4604,11 @@ dependencies = [
 
 [[package]]
 name = "yappr"
-version = "0.1.6"
-source = "git+https://github.com/fractalops/yappr?rev=fdae1681f120d4b44b4e7fbfde9104ec8eb8dfe6#fdae1681f120d4b44b4e7fbfde9104ec8eb8dfe6"
+version = "0.1.7-rc.1"
+source = "git+https://github.com/fractalops/yappr?rev=d84c4db98718d83f9fcdb16d060587141af337d4#d84c4db98718d83f9fcdb16d060587141af337d4"
 dependencies = [
  "anyhow",
+ "blake3",
  "cfg_aliases",
  "clap",
  "data-encoding",
