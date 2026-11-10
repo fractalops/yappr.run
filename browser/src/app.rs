@@ -57,6 +57,9 @@ struct View {
     pairing: bool,
     pairing_code: Option<String>,
     pairing_name: Option<String>,
+    /// The check code of the pending pairing. The computer's terminal shows
+    /// the same code.
+    pairing_check: Option<String>,
     network: RelaySettings,
 }
 #[derive(Debug, Clone, Serialize)]
@@ -313,11 +316,21 @@ async fn view(state: &AppState) -> Result<View, String> {
             enabled: writer.enabled,
         })
         .collect();
+    let device = load_or_create_secret(&state.dir).map_err(err)?.public();
+    let pairing_check = book
+        .invitation
+        .as_ref()
+        .map(|p| -> Result<String, String> {
+            let ticket: EndpointTicket = p.invitation.ticket.parse().map_err(err)?;
+            Ok(pairing::check_code(
+                ticket.endpoint_addr().id,
+                device,
+                &p.invitation.token,
+            ))
+        })
+        .transpose()?;
     Ok(View {
-        device_id: load_or_create_secret(&state.dir)
-            .map_err(err)?
-            .public()
-            .to_string(),
+        device_id: device.to_string(),
         writers,
         selected: book.selected,
         deliveries: outbox::list(&state.dir).map_err(err)?,
@@ -329,6 +342,7 @@ async fn view(state: &AppState) -> Result<View, String> {
             .transpose()
             .map_err(err)?,
         pairing_name: book.invitation.map(|p| p.name),
+        pairing_check,
         network: <RelaySettings as RelayStore>::load(&state.dir).map_err(err)?,
     })
 }
@@ -937,7 +951,7 @@ async fn pair_device(
     state: Arc<AppState>,
     invitation: String,
     name: String,
-) -> Result<(), String> {
+) -> Result<View, String> {
     let _guard = state.lifecycle.lock().await;
     let invitation = Invitation::decode(&invitation).map_err(err)?;
     readers::validate_name(&name).map_err(err)?;
@@ -949,7 +963,7 @@ async fn pair_device(
     })
     .await?;
     start_pair(app, state.clone(), pair).await;
-    Ok(())
+    view(&state).await
 }
 /// The address of this page, after the endpoint has a relay. The writer
 /// delivers its feed to this address.
@@ -1384,6 +1398,27 @@ mod native_tests {
         );
         assert_eq!(entries::all(&dir, &id).await.unwrap().len(), 250);
         assert_eq!(outbox::list(&dir).unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_pending_pairing_shows_the_check_code_of_the_terminal() {
+        let root = tempfile::tempdir().unwrap();
+        let writer = iroh::SecretKey::generate().public();
+        let ticket = EndpointTicket::new(iroh::EndpointAddr::new(writer)).to_string();
+        let token = "ab".repeat(32);
+        disk::write(&root.path().join("readers.json"), &json!({"writers":{},"selected":null,"invitation":{
+            "invitation":{"ticket":ticket,"token":token,"name":"Laptop","expires_at":"2099-01-01T00:00:00Z"},
+            "name":"Phone"
+        }})).unwrap();
+        let device = load_or_create_secret(&Dir::new(root.path().into()))
+            .unwrap()
+            .public();
+        let app = App::new(root.path().into(), |_| {});
+        let snapshot = app.invoke("snapshot", json!({})).await.unwrap();
+        assert_eq!(
+            snapshot["pairing_check"],
+            pairing::check_code(writer, device, &token)
+        );
     }
 
     #[tokio::test]

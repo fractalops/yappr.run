@@ -17,7 +17,7 @@
   type Row = { writer: string; log: string; ms: number; entry: Entry };
   type Network = { disabled: boolean; urls: string[] };
   type View = { device_id: string; writers: Writer[]; selected: string | null; deliveries: Delivery[];
-    pairing: boolean; pairing_code: string | null; pairing_name: string | null; network: Network };
+    pairing: boolean; pairing_code: string | null; pairing_name: string | null; pairing_check: string | null; network: Network };
   type Preview = { name: string; writer_id: string; expires_at: string|null; ticket?:string; machine?:string };
   type FeedEvent = { type: "platform_error"; message: string } | { type: "view"; view: View } | { type: "status"; text: string } | { type: "pair_failed"; message: string }
     | { type: "open_entry"; writer: string; log: string; id: number }
@@ -31,7 +31,7 @@
   let screen=$state('feed');
   let followSuccess=$state('');
   let view = $state<View>({ device_id: "", writers: [], selected: null, deliveries: [], pairing: false,
-    pairing_code: null, pairing_name: null, network: { disabled: false, urls: [] } });
+    pairing_code: null, pairing_name: null, pairing_check: null, network: { disabled: false, urls: [] } });
   let relayMode = $state("default");
   let relayUrls = $state("");
   let savingNetwork = $state(false);
@@ -321,7 +321,7 @@
       return;
     }
     pairWriter=preview.name;pairStep='sending';
-    try{await invoke('pair_device',{invitation:code,name});pairing=true;preview=null;}catch(e){error=String(e);pairStep='idle';}
+    try{view=await invoke<View>('pair_device',{invitation:code,name});pairing=true;preview=null;}catch(e){error=String(e);pairStep='idle';}
   }
   function startChoice(writerId: string, id: string, value: string, label: string) {
     const key = `${writerId}:${id}`;
@@ -434,7 +434,7 @@
             <p class="step done"><span class="mark">✓</span>Code read</p>
             <p class="step">{pairStep==='approved'?'Connected':pairStep==='retrying'?'Cannot reach the computer yet. Retrying…':pairStep==='waiting'?'Approve this device in the computer’s terminal.':'Sending your request…'}</p>
           </div>
-          {#if pairStep!=='approved'}<code class="identity">{shortId(view.device_id)}</code><p class="hint">Compare this ID with the computer's terminal.</p><button class="quiet" onclick={async()=>{await invoke('stop');pairing=false;pairStep='idle';}}>Use another code</button>{/if}
+          {#if pairStep!=='approved'}{#if view.pairing_check}<code class="identity">{view.pairing_check}</code><p class="hint">Check that the computer's terminal shows the same code.</p>{/if}<button class="quiet" onclick={async()=>{await invoke('stop');pairing=false;pairStep='idle';}}>Use another code</button>{/if}
         {:else if preview}
           <p class="step-label">3. Confirm the {preview.machine?'machine':'computer'}</p><p class="hint">{preview.name} · <code title={preview.writer_id}>{shortId(preview.writer_id)}</code></p>
           {#if preview.machine}<label for="machine-name">Machine name</label><input id="machine-name" bind:value={machineName} maxlength="80"/><p class="hint">This machine can send entries and questions to this device. It cannot read anything here.</p>
