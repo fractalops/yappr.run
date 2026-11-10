@@ -1,5 +1,7 @@
 //! The page commands and the tasks that read, receive, pair, and answer.
 
+#[cfg(not(target_family = "wasm"))]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use crate::{
@@ -12,6 +14,7 @@ use iroh::{endpoint::Connection, Endpoint, EndpointId};
 use n0_future::task::JoinHandle;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::sync::{Mutex, Notify, Semaphore};
+#[cfg(target_family = "wasm")]
 use wasm_bindgen::prelude::*;
 use yappr::{
     choices::{QuestionState, Tracker},
@@ -54,6 +57,9 @@ struct View {
     pairing: bool,
     pairing_code: Option<String>,
     pairing_name: Option<String>,
+    /// The check code of the pending pairing. The computer's terminal shows
+    /// the same code.
+    pairing_check: Option<String>,
     network: RelaySettings,
 }
 #[derive(Debug, Clone, Serialize)]
@@ -91,6 +97,9 @@ struct Runtime {
 }
 #[derive(Default)]
 struct AppState {
+    dir: Dir,
+    #[cfg(not(target_family = "wasm"))]
+    active: AtomicBool,
     runtime: Mutex<Option<Runtime>>,
     /// Takes the deliveries to the runtime's endpoint.
     receiver: Mutex<Option<JoinHandle<()>>>,
@@ -124,17 +133,29 @@ const BATCH: usize = 256;
 /// The page callback for events.
 #[derive(Clone)]
 struct AppHandle {
+    #[cfg(target_family = "wasm")]
     on_event: js_sys::Function,
+    #[cfg(not(target_family = "wasm"))]
+    on_event: Arc<dyn Fn(String) + Send + Sync>,
 }
 impl AppHandle {
     /// Send an event to the page as a JSON string.
     fn emit(&self, event: UiEvent) {
         if let Ok(json) = serde_json::to_string(&event) {
+            #[cfg(target_family = "wasm")]
             self.on_event
                 .call1(&JsValue::NULL, &JsValue::from_str(&json))
                 .ok();
+            #[cfg(not(target_family = "wasm"))]
+            (self.on_event)(json);
         }
     }
+}
+fn warn(text: &str) {
+    #[cfg(target_family = "wasm")]
+    web_sys::console::warn_1(&text.into());
+    #[cfg(not(target_family = "wasm"))]
+    log::warn!("{}", yappr::proto::printable(text));
 }
 fn err(error: impl std::fmt::Display) -> String {
     error.to_string()
@@ -142,7 +163,7 @@ fn err(error: impl std::fmt::Display) -> String {
 async fn book(state: &AppState) -> Result<Readers, String> {
     let mut slot = state.book.lock().await;
     if slot.is_none() {
-        let mut readers = Readers::load(&Dir).map_err(err)?;
+        let mut readers = Readers::load(&state.dir).map_err(err)?;
         // Move the entries that an older page saved in the book.
         let mut moved = false;
         for (id, writer) in readers.writers.iter_mut() {
@@ -150,7 +171,7 @@ async fn book(state: &AppState) -> Result<Readers, String> {
                 continue;
             }
             let log = writer.log.clone().unwrap_or_default();
-            entries::save(id, &log, &writer.entries, &[])
+            entries::save(&state.dir, id, &log, &writer.entries, &[])
                 .await
                 .map_err(err)?;
             let last = writer.entries.iter().map(|e| e.id).max().unwrap_or(0);
@@ -159,18 +180,33 @@ async fn book(state: &AppState) -> Result<Readers, String> {
             moved = true;
         }
         if moved {
-            readers.save(&Dir).map_err(err)?;
+            readers.save(&state.dir).map_err(err)?;
         }
         // Entries from before logs in IndexedDB have an empty log. They
         // belong to the current log of their machine.
         for (id, writer) in &readers.writers {
             if let Some(log) = &writer.log {
-                entries::rename_log(id, "", log).await.map_err(err)?;
+                entries::rename_log(&state.dir, id, "", log)
+                    .await
+                    .map_err(err)?;
             }
         }
         *slot = Some(readers);
     }
     Ok(slot.as_ref().expect("book exists").clone())
+}
+/// Update question states from a current or legacy entry.
+fn track(tracker: &mut Tracker, entry: &Entry) {
+    // Read the legacy question field without changing the signed entry.
+    if !entry.extra.contains_key("choices") {
+        if let Some(value) = entry.extra.get("rply") {
+            let mut view = entry.clone();
+            view.extra.insert("choices".into(), value.clone());
+            tracker.push(&view);
+            return;
+        }
+    }
+    tracker.push(entry);
 }
 /// The question states of the machine `id`.
 async fn questions(state: &AppState, id: &str) -> Result<Vec<QuestionState>, String> {
@@ -180,8 +216,8 @@ async fn questions(state: &AppState, id: &str) -> Result<Vec<QuestionState>, Str
         let mut all = BTreeMap::new();
         for id in readers.writers.keys() {
             let mut tracker = Tracker::default();
-            for entry in entries::all(id).await.map_err(err)? {
-                tracker.push(&entry);
+            for entry in entries::all(&state.dir, id).await.map_err(err)? {
+                track(&mut tracker, &entry);
             }
             all.insert(id.clone(), tracker);
         }
@@ -202,18 +238,43 @@ async fn update<T>(
     let mut slot = state.book.lock().await;
     let mut next = slot.as_ref().expect("book exists").clone();
     let result = apply(&mut next)?;
-    next.save(&Dir).map_err(err)?;
+    next.save(&state.dir).map_err(err)?;
     *slot = Some(next);
     Ok(result)
 }
+#[cfg(not(target_family = "wasm"))]
+fn is_active(state: &AppState) -> bool {
+    state.active.load(Ordering::Acquire)
+}
+#[cfg(target_family = "wasm")]
+fn is_active(_: &AppState) -> bool {
+    true
+}
+
 async fn runtime(app: &AppHandle, state: &Arc<AppState>) -> Result<Runtime, String> {
     let mut slot = state.runtime.lock().await;
+    if !is_active(state) {
+        return Err("Open the app to connect.".into());
+    }
     if let Some(runtime) = slot.as_ref() {
         return Ok(runtime.clone());
     }
-    let secret = load_or_create_secret(&Dir).map_err(err)?;
-    let relays = RelaySettings::load(&Dir).map_err(err)?;
+    let secret = load_or_create_secret(&state.dir).map_err(err)?;
+    let relays = <RelaySettings as RelayStore>::load(&state.dir).map_err(err)?;
+    #[cfg(target_family = "wasm")]
     let endpoint = net::bind(secret, &relays).await.map_err(err)?;
+    #[cfg(not(target_family = "wasm"))]
+    let endpoint = {
+        let opts = net::NetOptions {
+            relays,
+            ..net::Network::Default.into()
+        };
+        net::bind(secret, opts, vec![], None).await.map_err(err)?
+    };
+    if !is_active(state) {
+        endpoint.close().await;
+        return Err("Open the app to connect.".into());
+    }
     endpoint.set_alpns(vec![deliver::ALPN.to_vec()]);
     let receiving = n0_future::task::spawn(receive(app.clone(), state.clone(), endpoint.clone()));
     if let Some(old) = state.receiver.lock().await.replace(receiving) {
@@ -255,14 +316,24 @@ async fn view(state: &AppState) -> Result<View, String> {
             enabled: writer.enabled,
         })
         .collect();
+    let device = load_or_create_secret(&state.dir).map_err(err)?.public();
+    let pairing_check = book
+        .invitation
+        .as_ref()
+        .map(|p| -> Result<String, String> {
+            let ticket: EndpointTicket = p.invitation.ticket.parse().map_err(err)?;
+            Ok(pairing::check_code(
+                ticket.endpoint_addr().id,
+                device,
+                &p.invitation.token,
+            ))
+        })
+        .transpose()?;
     Ok(View {
-        device_id: load_or_create_secret(&Dir)
-            .map_err(err)?
-            .public()
-            .to_string(),
+        device_id: device.to_string(),
         writers,
         selected: book.selected,
-        deliveries: outbox::list(&Dir).map_err(err)?,
+        deliveries: outbox::list(&state.dir).map_err(err)?,
         pairing: book.invitation.is_some(),
         pairing_code: book
             .invitation
@@ -271,7 +342,8 @@ async fn view(state: &AppState) -> Result<View, String> {
             .transpose()
             .map_err(err)?,
         pairing_name: book.invitation.map(|p| p.name),
-        network: RelaySettings::load(&Dir).map_err(err)?,
+        pairing_check,
+        network: <RelaySettings as RelayStore>::load(&state.dir).map_err(err)?,
     })
 }
 async fn emit_view(app: &AppHandle, state: &AppState) {
@@ -315,7 +387,7 @@ async fn resume_all(app: AppHandle, state: Arc<AppState>) -> Result<(), String> 
     let book = book(&state).await?;
     if book.writers.values().any(|w| w.enabled)
         || book.invitation.is_some()
-        || outbox::list(&Dir)
+        || outbox::list(&state.dir)
             .map_err(err)?
             .iter()
             .any(|d| d.status == "queued")
@@ -382,6 +454,9 @@ async fn abort(task: Option<JoinHandle<()>>) {
     }
 }
 async fn start_follow(app: AppHandle, state: Arc<AppState>, ticket: EndpointTicket) {
+    if !is_active(&state) {
+        return;
+    }
     let id = ticket.endpoint_addr().id.to_string();
     abort(state.tasks.lock().await.remove(&id)).await;
     set_follow_health(&app, &state, &id, Health::default()).await;
@@ -438,14 +513,18 @@ async fn save_entries(
     // Build the question states from the saved entries before these entries
     // are saved, so that the tracker gets each entry once.
     questions(state, id).await?;
-    entries::save(id, &log, &new, &[]).await.map_err(err)?;
+    entries::save(&state.dir, id, &log, &new, &[])
+        .await
+        .map_err(err)?;
     let drop = update(state, |book| {
         book.saved(id, last).map_err(err)?;
         Ok(book.trim(id))
     })
     .await?;
     if !drop.is_empty() {
-        entries::save(id, &log, &[], &drop).await.map_err(err)?;
+        entries::save(&state.dir, id, &log, &[], &drop)
+            .await
+            .map_err(err)?;
     }
     let states = {
         let mut slot = state.trackers.lock().await;
@@ -455,7 +534,7 @@ async fn save_entries(
             .entry(id.into())
             .or_default();
         for entry in &new {
-            tracker.push(entry);
+            track(tracker, entry);
         }
         tracker.states()
     };
@@ -574,19 +653,27 @@ async fn run_follow(
 /// Take the deliveries that machines send to `endpoint`.
 async fn receive(app: AppHandle, state: Arc<AppState>, endpoint: Endpoint) {
     let permits = Arc::new(Semaphore::new(MAX_DELIVERIES));
-    while let Some(incoming) = endpoint.accept().await {
-        let Ok(permit) = permits.clone().try_acquire_owned() else {
-            incoming.refuse();
-            continue;
-        };
-        let (app, state, me) = (app.clone(), state.clone(), endpoint.id());
-        n0_future::task::spawn(async move {
-            let _permit = permit;
-            let Ok(conn) = incoming.await else { return };
-            if let Err(error) = take_delivery(&app, &state, conn, me).await {
-                web_sys::console::warn_1(&format!("delivery: {error}").into());
+    let mut tasks = n0_future::task::JoinSet::new();
+    loop {
+        tokio::select! {
+            incoming = endpoint.accept() => {
+                let Some(incoming) = incoming else { break };
+                if !is_active(&state) { incoming.refuse(); continue; }
+                let Ok(permit) = permits.clone().try_acquire_owned() else {
+                    incoming.refuse();
+                    continue;
+                };
+                let (app, state, me) = (app.clone(), state.clone(), endpoint.id());
+                tasks.spawn(async move {
+                    let _permit = permit;
+                    let Ok(conn) = incoming.await else { return };
+                    if let Err(error) = take_delivery(&app, &state, conn, me).await {
+                        warn(&format!("delivery: {error}"));
+                    }
+                });
             }
-        });
+            _ = tasks.join_next(), if !tasks.is_empty() => {}
+        }
     }
 }
 /// Save the entries of one delivery from an enabled machine, and tell the
@@ -597,6 +684,10 @@ async fn take_delivery(
     conn: Connection,
     me: EndpointId,
 ) -> Result<(), String> {
+    if !is_active(state) {
+        conn.close(0u32.into(), b"app inactive");
+        return Ok(());
+    }
     let incoming = deliver::accept(conn, me).await.map_err(err)?;
     let id = incoming.writer().to_string();
     let Some(saved) = book(state)
@@ -751,14 +842,14 @@ async fn choose(
         .question
         .expires_at
         .is_some_and(|expires| expires <= jiff::Timestamp::now())
-        && question.status == "pending"
+        && question.status.as_str() == "pending"
     {
         return Err("The question expired.".into());
     }
-    if question.status != "pending" {
+    if question.status.as_str() != "pending" {
         return Err(format!("The question is {}.", question.status));
     }
-    let local = load_or_create_secret(&Dir).map_err(err)?.public();
+    let local = load_or_create_secret(&state.dir).map_err(err)?.public();
     if question.question.responder != local {
         return Err("This question is for another device.".into());
     }
@@ -766,7 +857,7 @@ async fn choose(
         return Err("The option does not exist.".into());
     }
     let ticket: EndpointTicket = writer.ticket.parse().map_err(err)?;
-    outbox::queue(&Dir, &ticket, question_id, value).map_err(err)?;
+    outbox::queue(&state.dir, &ticket, question_id, value).map_err(err)?;
     start_worker(app.clone(), state.clone()).await;
     state.wake.notify_one();
     view(&state).await
@@ -774,6 +865,9 @@ async fn choose(
 /// Send the queued answers again and again, one task for each machine.
 async fn start_worker(app: AppHandle, state: Arc<AppState>) {
     let mut slot = state.worker.lock().await;
+    if !is_active(&state) {
+        return;
+    }
     if slot.as_ref().is_some_and(|t| !t.is_finished()) {
         return;
     }
@@ -783,7 +877,7 @@ async fn start_worker(app: AppHandle, state: Arc<AppState>) {
             if let (Ok(runtime), Ok(readers), Ok(deliveries)) = (
                 runtime(&app, &shared).await,
                 book(&shared).await,
-                outbox::list(&Dir),
+                outbox::list(&shared.dir),
             ) {
                 let mut by_writer: BTreeMap<String, Vec<Delivery>> = BTreeMap::new();
                 for mut delivery in deliveries.into_iter().filter(|d| d.status == "queued") {
@@ -815,9 +909,14 @@ async fn start_worker(app: AppHandle, state: Arc<AppState>) {
                                 break;
                             }
                             let delivering = shared.delivering.lock().await.get(&writer).cloned();
-                            outbox::deliver_with(&Dir, &client, &delivery, delivering.as_ref())
-                                .await
-                                .ok();
+                            outbox::deliver_with(
+                                &shared.dir,
+                                &client,
+                                &delivery,
+                                delivering.as_ref(),
+                            )
+                            .await
+                            .ok();
                             emit_view(&app, &shared).await;
                         }
                     });
@@ -852,7 +951,7 @@ async fn pair_device(
     state: Arc<AppState>,
     invitation: String,
     name: String,
-) -> Result<(), String> {
+) -> Result<View, String> {
     let _guard = state.lifecycle.lock().await;
     let invitation = Invitation::decode(&invitation).map_err(err)?;
     readers::validate_name(&name).map_err(err)?;
@@ -864,7 +963,7 @@ async fn pair_device(
     })
     .await?;
     start_pair(app, state.clone(), pair).await;
-    Ok(())
+    view(&state).await
 }
 /// The address of this page, after the endpoint has a relay. The writer
 /// delivers its feed to this address.
@@ -925,7 +1024,7 @@ async fn start_pair(app: AppHandle, state: Arc<AppState>, pair: PendingPair) {
                     Ok(reply) if reply.status == "rejected" => return Err(reply.message),
                     Err(error) => {
                         let text = format!("Pairing request failed: {error:#}");
-                        web_sys::console::warn_1(&text.as_str().into());
+                        warn(&text);
                         if !delivered {
                             pair_state(&app, "retrying");
                         }
@@ -1002,7 +1101,7 @@ async fn configure_network(
     if book(&state).await?.invitation.is_some() {
         return Err("Finish or cancel pairing before changing relays.".into());
     }
-    settings.save(&Dir).map_err(err)?;
+    RelayStore::save(&settings, &state.dir).map_err(err)?;
     let tasks = std::mem::take(&mut *state.tasks.lock().await);
     for task in tasks.into_values() {
         abort(Some(task)).await;
@@ -1051,7 +1150,7 @@ struct ChooseArgs {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PageArgs {
-    /// The place of the last entry that the page has: [ms, writer, id].
+    /// The place of the last entry that the page has: [ms, writer, log, id].
     before: Option<serde_json::Value>,
     limit: u32,
     writer_id: Option<String>,
@@ -1096,6 +1195,7 @@ async fn call(
             book(&state).await?;
             let before = a.before.map(|b| b.to_string()).unwrap_or_default();
             entries::page(
+                &state.dir,
                 &before,
                 a.limit.min(500),
                 a.writer_id.as_deref().unwrap_or(""),
@@ -1156,12 +1256,14 @@ async fn call(
 }
 
 /// The reader of this page. The page creates one and keeps it.
-#[wasm_bindgen]
+#[cfg_attr(target_family = "wasm", wasm_bindgen)]
+#[derive(Clone)]
 pub struct App {
     app: AppHandle,
     state: Arc<AppState>,
 }
 
+#[cfg(target_family = "wasm")]
 #[wasm_bindgen]
 impl App {
     /// `on_event` receives each event as a JSON string.
@@ -1189,5 +1291,259 @@ impl App {
                 .map_err(|e| JsValue::from_str(&e))?;
             Ok(JsValue::from_str(&result.to_string()))
         })
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl App {
+    /// Create a reader with private files and a JSON event sink.
+    pub fn new(dir: std::path::PathBuf, on_event: impl Fn(String) + Send + Sync + 'static) -> Self {
+        Self {
+            app: AppHandle {
+                on_event: Arc::new(on_event),
+            },
+            state: Arc::new(AppState {
+                dir: Dir::new(dir),
+                active: AtomicBool::new(true),
+                ..AppState::default()
+            }),
+        }
+    }
+
+    /// Run the same commands and return the same JSON values as the browser reader.
+    pub async fn invoke(
+        &self,
+        command: &str,
+        args: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        call(self.app.clone(), self.state.clone(), command, args).await
+    }
+
+    /// Allow network tasks before the native view resumes.
+    pub fn activate(&self) {
+        self.state.active.store(true, Ordering::Release);
+    }
+
+    /// Prevent new network tasks as soon as the native view becomes inactive.
+    pub fn deactivate(&self) {
+        self.state.active.store(false, Ordering::Release);
+    }
+
+    /// Stop network tasks when the app leaves the foreground.
+    pub async fn suspend(&self) {
+        let state = &self.state;
+        state.active.store(false, Ordering::Release);
+        let _guard = state.lifecycle.lock().await;
+        state.active.store(false, Ordering::Release);
+        abort(state.pair_task.lock().await.take()).await;
+        for task in std::mem::take(&mut *state.tasks.lock().await).into_values() {
+            abort(Some(task)).await;
+        }
+        abort(state.worker.lock().await.take()).await;
+        abort(state.receiver.lock().await.take()).await;
+        for conn in std::mem::take(&mut *state.delivering.lock().await).into_values() {
+            conn.close(0u32.into(), b"app suspended");
+        }
+        if let Some(runtime) = state.runtime.lock().await.take() {
+            runtime.client.close().await;
+            runtime.endpoint.close().await;
+        }
+        state.health.lock().await.clear();
+        let _saving = state.saving.lock().await;
+        *state.trackers.lock().await = None;
+    }
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod native_tests {
+    use super::*;
+    use serde_json::json;
+    use yappr::disk;
+
+    #[tokio::test]
+    async fn inline_history_moves_once_and_preserves_identity_and_outbox() {
+        let root = tempfile::tempdir().unwrap();
+        let writer = iroh::SecretKey::generate().public();
+        let ticket = EndpointTicket::new(iroh::EndpointAddr::new(writer)).to_string();
+        let id = writer.to_string();
+        let entries: Vec<Entry> = (1..=250).map(|id| serde_json::from_value(json!({
+            "v":1,"id":id,"time":"2026-11-01T10:00:00Z","source":"old","kind":"event","title":format!("Saved {id}"),"body":"saved text"
+        })).unwrap()).collect();
+        disk::write(&root.path().join("readers.json"), &json!({"writers":{id.clone():{"ticket":ticket,"name":"Saved machine","entries":entries,"enabled":false}},"selected":id,"invitation":null})).unwrap();
+        disk::write(&root.path().join("outbox.json"), &json!({"deliveries":[]})).unwrap();
+        let dir = Dir::new(root.path().into());
+        let identity = load_or_create_secret(&dir).unwrap().public().to_string();
+        let app = App::new(root.path().into(), |_| {});
+        let snapshot = app.invoke("snapshot", json!({})).await.unwrap();
+        assert_eq!(snapshot["device_id"], identity);
+        assert_eq!(snapshot["writers"][0]["last_id"], 250);
+        assert!(snapshot["writers"][0].get("entries").is_none());
+        assert_eq!(snapshot["writers"][0]["enabled"], false);
+        let page = app
+            .invoke(
+                "entries",
+                json!({"before":null,"limit":100,"writerId":null}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.as_array().unwrap().len(), 100);
+        assert_eq!(page[0]["entry"]["title"], "Saved 250");
+        let saved: serde_json::Value = disk::read(&root.path().join("readers.json")).unwrap();
+        assert!(saved["writers"][&id].get("entries").is_none());
+        assert!(root.path().join("readers.inline.json").exists());
+        let restarted = App::new(root.path().into(), |_| {});
+        assert_eq!(
+            restarted.invoke("snapshot", json!({})).await.unwrap()["device_id"],
+            identity
+        );
+        assert_eq!(entries::all(&dir, &id).await.unwrap().len(), 250);
+        assert_eq!(outbox::list(&dir).unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_pending_pairing_shows_the_check_code_of_the_terminal() {
+        let root = tempfile::tempdir().unwrap();
+        let writer = iroh::SecretKey::generate().public();
+        let ticket = EndpointTicket::new(iroh::EndpointAddr::new(writer)).to_string();
+        let token = "ab".repeat(32);
+        disk::write(&root.path().join("readers.json"), &json!({"writers":{},"selected":null,"invitation":{
+            "invitation":{"ticket":ticket,"token":token,"name":"Laptop","expires_at":"2099-01-01T00:00:00Z"},
+            "name":"Phone"
+        }})).unwrap();
+        let device = load_or_create_secret(&Dir::new(root.path().into()))
+            .unwrap()
+            .public();
+        let app = App::new(root.path().into(), |_| {});
+        let snapshot = app.invoke("snapshot", json!({})).await.unwrap();
+        assert_eq!(
+            snapshot["pairing_check"],
+            pairing::check_code(writer, device, &token)
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_legacy_entries_do_not_block_migration_or_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let writer = iroh::SecretKey::generate().public();
+        let ticket = EndpointTicket::new(iroh::EndpointAddr::new(writer)).to_string();
+        let id = writer.to_string();
+        let entry: Entry = serde_json::from_value(json!({
+            "v":1,"id":1,"time":"2026-11-01T10:00:00Z","source":"", "kind":"event","body":"old text"
+        }))
+        .unwrap();
+        assert!(entry.validate().is_err());
+        disk::write(&root.path().join("readers.json"), &json!({
+            "writers":{id.clone():{"ticket":ticket,"name":"Old machine","entries":[entry],"enabled":false}},
+            "selected":id,"invitation":null
+        })).unwrap();
+        for _ in 0..2 {
+            let app = App::new(root.path().into(), |_| {});
+            let view = app.invoke("snapshot", json!({})).await.unwrap();
+            assert_eq!(view["writers"][0]["last_id"], 1);
+            let page = app.invoke("entries", json!({"limit":100})).await.unwrap();
+            assert_eq!(page[0]["entry"]["body"], "old text");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_single_writer_cache_remains_readable() {
+        let root = tempfile::tempdir().unwrap();
+        let ticket = EndpointTicket::new(iroh::EndpointAddr::new(
+            iroh::SecretKey::generate().public(),
+        ))
+        .to_string();
+        disk::write(
+            &root.path().join("reader.json"),
+            &json!({"ticket":ticket,"entries":[],"writer_name":"Old machine","invitation":null}),
+        )
+        .unwrap();
+        let app = App::new(root.path().into(), |_| {});
+        assert_eq!(
+            app.invoke("snapshot", json!({})).await.unwrap()["writers"][0]["name"],
+            "Old machine"
+        );
+        assert!(root.path().join("reader.json").exists());
+    }
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+    #[test]
+    fn legacy_questions_keep_their_decisions_without_rewriting_entries() {
+        let responder = iroh::SecretKey::generate().public();
+        let id = yappr::choices::random_id();
+        let make = |id, record| {
+            serde_json::from_value::<Entry>(serde_json::json!({
+            "v":1,"id":id,"time":"2026-11-01T10:00:00Z","source":"test","kind":"event","body":"saved", "rply":record,
+        })).unwrap()
+        };
+        let question = make(
+            1,
+            serde_json::json!({"type":"question","question":{
+                "id":id,"source":"test","title":"Continue?","body":"Saved question",
+                "options":[{"value":"yes","label":"Yes"},{"value":"no","label":"No"}],
+                "responder":responder,"expires_at":null,"approval":false,
+            }}),
+        );
+        let decision = make(
+            2,
+            serde_json::json!({"type":"decision","decision":{
+                "question_id":id,"submission_id":yappr::choices::random_id(),"value":"yes","responder":responder,"time":"2026-11-01T10:00:01Z",
+            }}),
+        );
+        let original = serde_json::to_value(&question).unwrap();
+        let mut tracker = Tracker::default();
+        track(&mut tracker, &question);
+        track(&mut tracker, &decision);
+        let states = serde_json::to_value(tracker.states()).unwrap();
+        assert_eq!(states[0]["status"], "answered");
+        assert_eq!(states[0]["decision"]["value"], "yes");
+        assert_eq!(serde_json::to_value(&question).unwrap(), original);
+        assert!(!question.extra.contains_key("choices"));
+    }
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod lifecycle_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn a_choice_after_suspension_stays_queued_without_starting_network_tasks() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = Dir::new(root.path().into());
+        let responder = load_or_create_secret(&dir).unwrap().public();
+        let writer = iroh::SecretKey::generate().public();
+        let ticket = EndpointTicket::new(iroh::EndpointAddr::new(writer));
+        let question_id = yappr::choices::random_id();
+        let entry: Entry = serde_json::from_value(json!({"v":1,"id":1,"time":"2026-11-01T10:00:00Z","source":"test","kind":"question","body":"saved","choices":{
+            "type":"question","question":{"id":question_id,"source":"test","title":"Continue?","body":"saved",
+            "options":[{"value":"yes","label":"Yes"},{"value":"no","label":"No"}],"responder":responder,"expires_at":null,"approval":false}
+        }})).unwrap();
+        let mut book = Readers::default();
+        let id = book.add(&ticket, Some("Test machine".into())).unwrap();
+        book.save(&dir).unwrap();
+        let app = App::new(root.path().into(), |_| {});
+        app.invoke("snapshot", json!({})).await.unwrap();
+        // A save can stop after the cursor advances and before tracking the entry.
+        entries::save(&app.state.dir, &id, "", &[entry], &[])
+            .await
+            .unwrap();
+        update(&app.state, |book| book.saved(&id, 1).map_err(err))
+            .await
+            .unwrap();
+        app.suspend().await;
+        // A foreground countdown can finish as the app becomes hidden.
+        let result = app
+            .invoke(
+                "choose",
+                json!({"writerId":id,"questionId":question_id,"value":"yes"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["deliveries"][0]["status"], "queued");
+        assert!(app.state.worker.lock().await.is_none());
+        assert!(app.state.runtime.lock().await.is_none());
     }
 }

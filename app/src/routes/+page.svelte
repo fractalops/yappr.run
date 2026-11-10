@@ -1,24 +1,26 @@
 <script lang="ts">
   import CodeInput from "#lib/CodeInput.svelte";
-  import { invoke, listen } from "#lib/reader.ts";
+  import PlatformSettings from "#lib/PlatformSettings.svelte";
+  import { invoke, listen, deviceName, copyText as writeClipboard } from "#lib/reader.ts";
   import { onMount, tick } from "svelte";
   import { resolve } from "$app/paths";
   import { linkSegments, renderMarkdown } from "#lib/body.ts";
 
   type Entry = { id: number; time: string; source: string; kind: string; level?: string; subject?: string; title?: string; body: string;
-    format?: string; data?: Record<string, unknown>; sig?: string; choices?: { type?: string; question?: { id: string } } };
+    format?: string; data?: Record<string, unknown>; sig?: string; choices?: { type?: string; question?: { id: string } }; rply?: { type?: string; question?: { id: string } } };
   type Question = { question: { id: string; title: string; body: string; options: { value: string; label: string }[];
     responder: string; expires_at: string | null; approval: boolean }; status: string; decision: { value: string; responder: string } | null };
   type Delivery = { decision?:Question["decision"]; ticket: string; writer: string; submission: { question_id: string; value: string }; status: string; error: string | null };
   type Health = { state: string; route: string | null; address: string | null; rtt_ms: number | null; error: string | null; retry_in_ms: number | null };
   type Writer = { id: string; name: string; ticket: string; log: string | null; last_id: number; questions: Question[]; enabled: boolean; delivering: boolean; delivers_only: boolean; health: Health };
-  // One saved entry and its place in the feed: time, machine, id.
+  // One saved entry and its place in the feed: time, machine, log, and id.
   type Row = { writer: string; log: string; ms: number; entry: Entry };
   type Network = { disabled: boolean; urls: string[] };
   type View = { device_id: string; writers: Writer[]; selected: string | null; deliveries: Delivery[];
-    pairing: boolean; pairing_code: string | null; pairing_name: string | null; network: Network };
+    pairing: boolean; pairing_code: string | null; pairing_name: string | null; pairing_check: string | null; network: Network };
   type Preview = { name: string; writer_id: string; expires_at: string|null; ticket?:string; machine?:string };
-  type FeedEvent = { type: "view"; view: View } | { type: "status"; text: string } | { type: "pair_failed"; message: string }
+  type FeedEvent = { type: "platform_error"; message: string } | { type: "view"; view: View } | { type: "status"; text: string } | { type: "pair_failed"; message: string }
+    | { type: "open_entry"; writer: string; log: string; id: number }
     | { type: "pair_state"; state: "sending" | "waiting" | "retrying" }
     | { type: "health"; writer_id: string; health: Health }
     | { type: "entries"; writer_id: string; rows: { ms: number; log: string; entry: Entry }[]; questions: Question[] };
@@ -29,15 +31,16 @@
   let screen=$state('feed');
   let followSuccess=$state('');
   let view = $state<View>({ device_id: "", writers: [], selected: null, deliveries: [], pairing: false,
-    pairing_code: null, pairing_name: null, network: { disabled: false, urls: [] } });
+    pairing_code: null, pairing_name: null, pairing_check: null, network: { disabled: false, urls: [] } });
   let relayMode = $state("default");
   let relayUrls = $state("");
   let savingNetwork = $state(false);
   let machineName = $state("");
+  let platformError = $state("");
   let status = $state("Reading saved entries…");
   let error = $state("");
   let code = $state("");
-  let name = $state("My browser");
+  let name = $state(deviceName);
   let preview = $state<Preview | null>(null);
   let pairing = $state(false);
   // The steps of a pairing request: sending, then waiting for the writer's
@@ -90,7 +93,13 @@
     if (all.length > Math.max(old.length, PAGE)) { older = true; return all.slice(0, Math.max(old.length, PAGE)); }
     return all;
   }
+  let readingRows: Promise<void> | undefined;
   async function loadRows(reset: boolean) {
+    if (readingRows) return readingRows;
+    readingRows = readPage(reset);
+    try { await readingRows; } finally { readingRows=undefined; }
+  }
+  async function readPage(reset: boolean) {
     if (loading) return;
     loading = true;
     try {
@@ -101,6 +110,20 @@
       older = page.length === PAGE;
     } catch (e) { error = String(e); }
     finally { loading = false; }
+  }
+
+  async function openEntry(target:{writer:string;log:string;id:number}) {
+    await readingRows;
+    selectedMachine=target.writer; tab="all"; screen="feed";
+    await loadRows(true);
+    const key=`${target.writer}:${target.log}:${target.id}`;
+    for(let page=0;older&&!rows.some(row=>rowKey(row)===key)&&page<50;page++) {
+      const count=rows.length; await loadRows(false); if(rows.length===count) break;
+    }
+    if(!rows.some(row=>rowKey(row)===key)) {error="This entry is no longer saved on this device.";return;}
+    expanded=key;
+    await tick();
+    document.getElementById(`entry-${key}`)?.scrollIntoView({block:"center"});
   }
 
   type FeedItem = { key: string; writer: Writer; log: string; entry: Entry; question?: Question };
@@ -116,14 +139,15 @@
       const writer = writers.get(row.writer);
       const { entry } = row;
       if (!writer || (selectedMachine && writer.id !== selectedMachine)) return [];
-      if (entry.choices?.type === "decision" || entry.choices?.type === "cancelled") return [];
+      const choices = entry.choices ?? entry.rply;
+      if (choices?.type === "decision" || choices?.type === "cancelled") return [];
       if (entry.kind === "state" && entry.subject) {
         const subject = `${writer.id}:${entry.subject}`;
         if (seen.has(subject)) return [];
         seen.add(subject);
       }
       return [{ key: rowKey(row), writer, log: row.log, entry,
-        question: entry.choices?.type === "question" ? questions.get(`${writer.id}:${entry.choices.question?.id ?? ""}`) : undefined }];
+        question: choices?.type === "question" ? questions.get(`${writer.id}:${choices.question?.id ?? ""}`) : undefined }];
     });
   });
   // Count the open questions of all saved entries, also the ones that the
@@ -163,7 +187,7 @@
   let copiedEntry=$state('');
   function shortId(id:string) { return id.length>16 ? `${id.slice(0,8)}…${id.slice(-4)}` : id; }
   async function copy(text:string,key:string) {
-    try{await navigator.clipboard.writeText(text);copiedEntry=key;setTimeout(()=>{if(copiedEntry===key)copiedEntry='';},1600);}
+    try{await writeClipboard(text);copiedEntry=key;setTimeout(()=>{if(copiedEntry===key)copiedEntry='';},1600);}
     catch{error='The clipboard is unavailable.';}
   }
   // The title and the body as people read them. A Markdown body keeps its syntax.
@@ -297,7 +321,7 @@
       return;
     }
     pairWriter=preview.name;pairStep='sending';
-    try{await invoke('pair_device',{invitation:code,name});pairing=true;preview=null;}catch(e){error=String(e);pairStep='idle';}
+    try{view=await invoke<View>('pair_device',{invitation:code,name});pairing=true;preview=null;}catch(e){error=String(e);pairStep='idle';}
   }
   function startChoice(writerId: string, id: string, value: string, label: string) {
     const key = `${writerId}:${id}`;
@@ -321,14 +345,18 @@
     }
   }
   async function copyId() {
-    try { await navigator.clipboard.writeText(view.device_id); copied = true; setTimeout(() => copied = false, 1500); }
+    try { await writeClipboard(view.device_id); copied = true; setTimeout(() => copied = false, 1500); }
     catch { error = "Select the device ID and copy it."; }
   }
 
   onMount(() => {
     let active = true;
     const unlisten = listen<FeedEvent>((payload) => {
-      if (payload.type === "view") {
+      if (payload.type === "platform_error") {
+        platformError = payload.message;
+      } else if (payload.type === "open_entry") {
+        void openEntry(payload).catch(e=>error=String(e));
+      } else if (payload.type === "view") {
         const wasPairing = pairing || view.pairing;
         view = payload.view;
         if (wasPairing && view.writers.length && !view.pairing) {
@@ -386,7 +414,7 @@
     <button role="tab" id="feed-tab" aria-controls="feed-panel" aria-selected={screen==='feed'} tabindex={screen==='feed'?0:-1} onclick={()=>screen='feed'} onkeydown={switchTab}>Feed</button>
     <button role="tab" id="devices-tab" aria-controls="devices-panel" aria-selected={screen==='devices'} tabindex={screen==='devices'?0:-1} onclick={()=>screen='devices'} onkeydown={switchTab}>Setup</button>
   </div>
-  {#if error}<p class="error global-error" role="alert">{error}</p>{/if}
+  {#if error || platformError}<p class="error global-error" role="alert">{error || platformError}</p>{/if}
   <div id="devices-panel" role="tabpanel" tabindex="0" aria-labelledby="devices-tab" hidden={screen!=='devices'}>
     <div class="devices-intro"><h1>{hasConnections?'Machines':'Connect your computer'}</h1><p class="intro">{hasConnections?'Pause a machine, or connect another one.':'Pair this device with a computer that runs Yappr.'}</p></div>
     {#if view.writers.length}
@@ -406,7 +434,7 @@
             <p class="step done"><span class="mark">✓</span>Code read</p>
             <p class="step">{pairStep==='approved'?'Connected':pairStep==='retrying'?'Cannot reach the computer yet. Retrying…':pairStep==='waiting'?'Approve this device in the computer’s terminal.':'Sending your request…'}</p>
           </div>
-          {#if pairStep!=='approved'}<code class="identity">{shortId(view.device_id)}</code><p class="hint">Compare this ID with the computer's terminal.</p><button class="quiet" onclick={async()=>{await invoke('stop');pairing=false;pairStep='idle';}}>Use another code</button>{/if}
+          {#if pairStep!=='approved'}{#if view.pairing_check}<code class="identity">{view.pairing_check}</code><p class="hint">Check that the computer's terminal shows the same code.</p>{/if}<button class="quiet" onclick={async()=>{await invoke('stop');pairing=false;pairStep='idle';}}>Use another code</button>{/if}
         {:else if preview}
           <p class="step-label">3. Confirm the {preview.machine?'machine':'computer'}</p><p class="hint">{preview.name} · <code title={preview.writer_id}>{shortId(preview.writer_id)}</code></p>
           {#if preview.machine}<label for="machine-name">Machine name</label><input id="machine-name" bind:value={machineName} maxlength="80"/><p class="hint">This machine can send entries and questions to this device. It cannot read anything here.</p>
@@ -423,6 +451,7 @@
     </section>
     {#if hasConnections || hasHistory}<button class="view-feed" onclick={()=>screen='feed'}>View feed <span aria-hidden="true">→</span></button>{/if}
     <details class="panel device-panel"><summary>Advanced settings</summary>
+      <PlatformSettings />
       <details><summary>This device</summary>
       <code class="identity">{view.device_id || "Reading identity…"}</code>
       <button class="quiet" onclick={copyId}>{copied ? "Copied" : "Copy device ID"}</button></details>
@@ -778,4 +807,5 @@
     :global(:root) { --border: #626976; --rule: #4a505b; --muted: #c4cad4; --subtle: #b5bdc9; }
     .body { color: #d9dde4; }
   }
+@media(pointer:coarse){.machine-control input{font-size:16px;}}
 </style>

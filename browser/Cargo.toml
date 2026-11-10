@@ -5,20 +5,33 @@ edition = "2021"
 publish = false
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 anyhow = "1"
-console_error_panic_hook = "0.1"
+log = "0.4"
 data-encoding = "2"
 iroh = { version = "1", default-features = false, features = ["tls-ring"] }
 jiff = { version = "0.2", features = ["js"] }
-js-sys = "0.3"
 n0-future = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", default-features = false, features = ["macros", "sync"] }
+yappr = { git = "https://github.com/fractalops/yappr", rev = "3dd1773aee18a7aca08216807e3cf06c28f7637b" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+console_error_panic_hook = "0.1"
+js-sys = "0.3"
 wasm-bindgen = "=0.2.129"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = ["console", "Storage", "Window"] }
-yappr = { git = "https://github.com/fractalops/yappr", rev = "962a9d2db73938fa3700315435607c37b96eec95" }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+rusqlite = { version = "0.41", features = ["bundled"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+tempfile = "3"
+
+[target.'cfg(target_family = "wasm")'.dev-dependencies]
+wasm-bindgen-test = "=0.3.79"

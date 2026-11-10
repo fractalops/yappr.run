@@ -28,4 +28,5 @@
 </div>
 <style>
 .actions{display:flex;flex-wrap:wrap;gap:6px 16px;margin:12px 0;}button{min-height:36px;padding:6px 0;border:0;background:transparent;color:#c1c7d0;font-size:13px;}button:hover{color:#edf0f5;}label{display:block;font-size:12px;color:var(--muted);margin:12px 0 6px;}textarea{width:100%;padding:10px;border:1px solid #3a3f49;border-radius:7px;background:#121418;color:inherit;resize:vertical;font-size:14px;overflow-wrap:anywhere;}.confirm{border:1px solid #4a4f5a;border-radius:6px;padding:6px 12px;margin-top:8px;}.file{display:none;}.failure{font-size:12px;color:#e0aaaa;overflow-wrap:anywhere;}
+@media(pointer:coarse){textarea{font-size:16px;}}
 </style>

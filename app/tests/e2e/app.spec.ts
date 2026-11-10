@@ -21,9 +21,9 @@ function env() {
 async function cli(...args: string[]) {
   return execute(binary, ["--dir", dir, ...args], { env: env(), timeout: 60_000 });
 }
-// Start the writer with a pairing code. Returns the code and the next line of
-// stderr that names a device to accept.
-async function startWriter(): Promise<{ code: string; device: Promise<string> }> {
+// Start the writer with a pairing code. Returns the code, the next device
+// to accept from stderr, and the check code that the terminal shows for it.
+async function startWriter(): Promise<{ code: string; device: Promise<string>; check: Promise<string> }> {
   writer = spawn(binary, ["--dir", dir, "start", "--pair", "--name", "Work laptop"], { env: env() });
   let out = "", err = "";
   const device = new Promise<string>((done) => {
@@ -34,6 +34,12 @@ async function startWriter(): Promise<{ code: string; device: Promise<string> }>
       if (id) done(id[1]);
     });
   });
+  const check = new Promise<string>((done) => {
+    writer!.stderr!.on("data", () => {
+      const value = err.match(/Check code: (\d{3} \d{3})/);
+      if (value) done(value[1]);
+    });
+  });
   const code = await new Promise<string>((done) => {
     writer!.stdout!.on("data", (chunk) => {
       out += chunk;
@@ -41,7 +47,7 @@ async function startWriter(): Promise<{ code: string; device: Promise<string> }>
       if (line) done(line.trim());
     });
   });
-  return { code, device };
+  return { code, device, check };
 }
 async function stopWriter() {
   if (writer && writer.exitCode === null) {
@@ -54,7 +60,7 @@ async function stopWriter() {
   writer = undefined;
 }
 async function pair(page: Page) {
-  const { code, device } = await startWriter();
+  const { code, device, check } = await startWriter();
   await page.goto("./");
   await expect(page.getByRole("tab", { name: "Setup", exact: true })).toHaveAttribute("aria-selected", "true");
   await page.getByRole("button", { name: "Paste a code", exact: true }).click();
@@ -62,6 +68,7 @@ async function pair(page: Page) {
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   await expect(page.getByText(/Work laptop ·/)).toBeVisible();
   await page.getByRole("button", { name: "Request pairing", exact: true }).click();
+  await expect(page.getByText(await check, { exact: true })).toBeVisible();
   await cli("pair", "--accept", await device);
   await expect(page.getByRole("button", { name: "Pause Work laptop", exact: true })).toBeVisible();
   await page.getByRole("tab", { name: "Feed", exact: true }).click();

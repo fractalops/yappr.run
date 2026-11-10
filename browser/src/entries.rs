@@ -4,7 +4,7 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 use yappr::entry::Entry;
 
-use crate::readers::LIMIT;
+use crate::{readers::LIMIT, storage::Dir};
 
 #[wasm_bindgen(module = "/src/entry_store.js")]
 extern "C" {
@@ -40,10 +40,16 @@ struct Record<'a> {
 /// Save `entries` of the log `log` of `writer`. Keep at most [`LIMIT`]
 /// entries of that log, and remove the logs in `drop`. Returns when the
 /// browser has the entries on disk.
-pub async fn save(writer: &str, log: &str, entries: &[Entry], drop: &[String]) -> Result<()> {
-    let Some(last) = entries.iter().map(|e| e.id).max() else {
+pub async fn save(
+    _: &Dir,
+    writer: &str,
+    log: &str,
+    entries: &[Entry],
+    drop: &[String],
+) -> Result<()> {
+    if entries.is_empty() && drop.is_empty() {
         return Ok(());
-    };
+    }
     let records: Vec<Record> = entries
         .iter()
         .map(|entry| Record {
@@ -51,7 +57,12 @@ pub async fn save(writer: &str, log: &str, entries: &[Entry], drop: &[String]) -
             entry,
         })
         .collect();
-    let keep_from = (last + 1).saturating_sub(LIMIT);
+    let keep_from = entries
+        .iter()
+        .map(|e| e.id)
+        .max()
+        .map(|last| last.saturating_add(1).saturating_sub(LIMIT))
+        .unwrap_or(0);
     put_entries(
         writer,
         log,
@@ -64,18 +75,49 @@ pub async fn save(writer: &str, log: &str, entries: &[Entry], drop: &[String]) -
 }
 
 /// All saved entries of `writer`, in id order.
-pub async fn all(writer: &str) -> Result<Vec<Entry>> {
+pub async fn all(_: &Dir, writer: &str) -> Result<Vec<Entry>> {
     let json = writer_entries(writer).await.map_err(js)?;
     Ok(serde_json::from_str(&json.as_string().unwrap_or_default())?)
 }
 
 /// Move the entries of the log `from` of `writer` to the log `to`.
-pub async fn rename_log(writer: &str, from: &str, to: &str) -> Result<()> {
+pub async fn rename_log(_: &Dir, writer: &str, from: &str, to: &str) -> Result<()> {
     move_log(writer, from, to).await.map_err(js)
 }
 
 /// Up to `limit` entries before the place `before`, newest first, as JSON.
-pub async fn page(before: &str, limit: u32, writer: &str) -> Result<serde_json::Value> {
+pub async fn page(_: &Dir, before: &str, limit: u32, writer: &str) -> Result<serde_json::Value> {
     let json = page_of(before, limit, writer).await.map_err(js)?;
     Ok(serde_json::from_str(&json.as_string().unwrap_or_default())?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasm_bindgen_test::*;
+    wasm_bindgen_test_configure!(run_in_browser);
+
+    #[wasm_bindgen_test]
+    async fn empty_save_drops_old_logs_without_changing_other_logs() {
+        let dir = Dir;
+        let entry: Entry = serde_json::from_value(serde_json::json!({
+            "v":1,"id":1,"time":"2026-11-01T10:00:00Z","source":"test","kind":"event","body":"saved"
+        }))
+        .unwrap();
+        save(&dir, "drop-test", "old", std::slice::from_ref(&entry), &[])
+            .await
+            .unwrap();
+        save(&dir, "drop-test", "current", &[entry], &[])
+            .await
+            .unwrap();
+        save(&dir, "drop-test", "current", &[], &["old".into()])
+            .await
+            .unwrap();
+        let rows = page(&dir, "", 100, "drop-test").await.unwrap();
+        assert_eq!(rows.as_array().unwrap().len(), 1);
+        assert_eq!(rows[0]["log"], "current");
+        save(&dir, "drop-test", "current", &[], &["current".into()])
+            .await
+            .unwrap();
+    }
 }

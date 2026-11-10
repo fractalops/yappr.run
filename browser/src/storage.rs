@@ -11,7 +11,7 @@ use crate::readers::Readers;
 
 /// The storage of this page. The app code passes it where the native code
 /// passes a data directory.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct Dir;
 
 fn local() -> Result<web_sys::Storage> {
@@ -23,7 +23,7 @@ fn local() -> Result<web_sys::Storage> {
 }
 
 /// The value at `key`, or the default value when the key does not exist.
-pub fn read<T: DeserializeOwned + Default>(key: &str) -> Result<T> {
+pub fn read<T: DeserializeOwned + Default>(_: &Dir, key: &str) -> Result<T> {
     match local()?
         .get_item(key)
         .map_err(|e| anyhow::anyhow!("{e:?}"))?
@@ -33,7 +33,7 @@ pub fn read<T: DeserializeOwned + Default>(key: &str) -> Result<T> {
     }
 }
 
-pub fn write<T: Serialize>(key: &str, value: &T) -> Result<()> {
+pub fn write<T: Serialize>(_: &Dir, key: &str, value: &T) -> Result<()> {
     local()?
         .set_item(key, &serde_json::to_string(value)?)
         .map_err(|e| anyhow::anyhow!("cannot save {key}: {e:?}"))
@@ -41,12 +41,13 @@ pub fn write<T: Serialize>(key: &str, value: &T) -> Result<()> {
 
 /// The identity of this page. Create it if it does not exist.
 pub fn load_or_create_secret(_: &Dir) -> Result<SecretKey> {
-    let saved: Option<String> = read("yappr.secret")?;
+    let saved: Option<String> = read(&Dir, "yappr.secret")?;
     if let Some(text) = saved {
         return SecretKey::from_str(&text).context("the saved identity is not valid");
     }
     let key = SecretKey::generate();
     write(
+        &Dir,
         "yappr.secret",
         &data_encoding::HEXLOWER.encode(&key.to_bytes()),
     )?;
@@ -61,24 +62,30 @@ pub trait RelayStore: Sized {
 
 impl RelayStore for RelaySettings {
     fn load(_: &Dir) -> Result<Self> {
-        let settings: Self = read("yappr.network")?;
+        let settings: Self = read(&Dir, "yappr.network")?;
         settings.validate()?;
         Ok(settings)
     }
     fn save(&self, _: &Dir) -> Result<()> {
         self.validate()?;
-        write("yappr.network", self)
+        write(&Dir, "yappr.network", self)
     }
 }
 
 impl Readers {
     pub fn load(_: &Dir) -> Result<Self> {
-        let book: Self = read("yappr.readers")?;
+        let book: Self = read(&Dir, "yappr.readers")?;
         book.validate()?;
         Ok(book)
     }
     pub fn save(&self, _: &Dir) -> Result<()> {
         self.validate()?;
-        write("yappr.readers", self)
+        write(&Dir, "yappr.readers", self)
     }
+}
+
+/// A synchronous browser update runs without another task between its reads and writes.
+pub struct OutboxGuard;
+pub fn lock_outbox(_: &Dir) -> Result<OutboxGuard> {
+    Ok(OutboxGuard)
 }
