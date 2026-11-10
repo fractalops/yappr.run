@@ -4604,8 +4604,8 @@ dependencies = [
 
 [[package]]
 name = "yappr"
-version = "0.1.7-rc.1"
-source = "git+https://github.com/fractalops/yappr?rev=d84c4db98718d83f9fcdb16d060587141af337d4#d84c4db98718d83f9fcdb16d060587141af337d4"
+version = "0.1.7"
+source = "git+https://github.com/fractalops/yappr?rev=3dd1773aee18a7aca08216807e3cf06c28f7637b#3dd1773aee18a7aca08216807e3cf06c28f7637b"
 dependencies = [
  "anyhow",
  "blake3",
