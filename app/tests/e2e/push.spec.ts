@@ -35,36 +35,42 @@ test("the notification toggle stays off when the browser refuses push", async ({
   await expect(toggle).not.toBeChecked();
 });
 
-test("the service worker shows a push and closes the notification on click", async ({ page, context }) => {
-  await context.grantPermissions(["notifications"]);
+test("the service worker shows a push and opens Yappr on click", async ({ page, context }) => {
   await page.goto("./");
   const worker = context.serviceWorkers()[0] ?? await context.waitForEvent("serviceworker");
   await page.evaluate(() => navigator.serviceWorker.ready.then(() => true));
-  await worker.evaluate(() => {
-    const scope = globalThis as unknown as {
-      PushEvent: new (type: string, init: { data: string }) => Event;
-      dispatchEvent(event: Event): boolean;
-    };
-    const push = new scope.PushEvent("push", { data: JSON.stringify({
-      writer: "Laptop", title: "A test warning", body: "Check the build.", entry_id: 42,
-    }) });
-    scope.dispatchEvent(push);
-  });
-  await expect.poll(() => page.evaluate(async () => {
-    const registration = await navigator.serviceWorker.ready;
-    return (await registration.getNotifications()).map((notice) => ({ title: notice.title, body: notice.body }));
-  })).toEqual([{ title: "A test warning", body: "Laptop\nCheck the build." }]);
-  await worker.evaluate(async () => {
+  const result = await worker.evaluate(async () => {
     const scope = globalThis as unknown as {
       registration: ServiceWorkerRegistration;
-      NotificationEvent: new (type: string, init: { notification: Notification }) => Event;
+      clients: { matchAll: () => Promise<unknown[]>; openWindow: (url: string) => Promise<unknown> };
       dispatchEvent(event: Event): boolean;
     };
-    const [notice] = await scope.registration.getNotifications();
-    scope.dispatchEvent(new scope.NotificationEvent("notificationclick", { notification: notice }));
+    // Test the worker in the browser without using the system notification tray.
+    const shown: { title: string; body?: string }[] = [];
+    const opened: string[] = [];
+    let closed = false;
+    scope.registration.showNotification = async (title, options) => {
+      shown.push({ title, body: options?.body });
+    };
+    scope.clients.matchAll = async () => [];
+    scope.clients.openWindow = async (url) => { opened.push(url); };
+    const dispatch = async (name: string, fields: object) => {
+      const work: Promise<unknown>[] = [];
+      const event = Object.assign(new Event(name), fields, {
+        waitUntil: (pending: Promise<unknown>) => work.push(pending),
+      });
+      scope.dispatchEvent(event);
+      await Promise.all(work);
+    };
+    await dispatch("push", { data: { json: () => ({
+      writer: "Laptop", title: "A test warning", body: "Check the build.", entry_id: 42,
+    }) } });
+    await dispatch("notificationclick", { notification: { close: () => { closed = true; } } });
+    return { shown, opened, closed };
   });
-  await expect.poll(() => page.evaluate(async () => {
-    const registration = await navigator.serviceWorker.ready;
-    return (await registration.getNotifications()).length;
-  })).toBe(0);
+  expect(result).toEqual({
+    shown: [{ title: "A test warning", body: "Laptop\nCheck the build." }],
+    opened: [page.url()],
+    closed: true,
+  });
 });
