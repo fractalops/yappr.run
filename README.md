@@ -41,10 +41,12 @@ On your phone, select **Feed** to see **Backup complete**.
 Use a writer that supports Web Push. In **Setup**, open **Advanced settings**.
 Select **Notify me when this page is closed** and allow browser notifications.
 Yappr sends a notification for a question, a warning, or an alert.
-Select the notification to open Yappr. Answer questions in the app.
+If Chrome shows reply buttons, select one to answer from the notification.
+Otherwise, select the notification to open the question in Yappr.
 
 On an iPhone with iOS 16.4 or later, add Yappr to your Home Screen first.
 Open it from there to pair your computer and allow notifications.
+On iPhone, select the notification to open Yappr and answer there.
 
 ## Answer a request
 

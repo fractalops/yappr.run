@@ -4,6 +4,8 @@
   import { invoke, listen, deviceName, copyText as writeClipboard } from "#lib/reader.ts";
   import { onMount, tick } from "svelte";
   import { resolve } from "$app/paths";
+  import { clearResolvedNotifications, copyNotificationSnapshot, startNotificationPage } from "#lib/notification-page.ts";
+  import type { QuestionTarget } from "#lib/notifications.ts";
   import { linkSegments, renderMarkdown } from "#lib/body.ts";
   import { createPushKeys, disablePush, enablePush, isWebPage, restorePush, rotatePush, supportsPush, type PushKeys, type PushSubscriptionData } from "#lib/push.ts";
 
@@ -118,18 +120,38 @@
     finally { loading = false; }
   }
 
-  async function openEntry(target:{writer:string;log:string;id:number}) {
+  async function openEntry(target:{writer:string;log:string;id:number;question?:string}) {
     await readingRows;
     selectedMachine=target.writer; tab="all"; screen="feed";
     await loadRows(true);
     const key=`${target.writer}:${target.log}:${target.id}`;
-    for(let page=0;older&&!rows.some(row=>rowKey(row)===key)&&page<50;page++) {
+    const matches = (row: Row) => rowKey(row) === key
+      && (!target.question || (row.entry.choices ?? row.entry.rply)?.question?.id === target.question);
+    for(let page=0;older&&!rows.some(matches)&&page<50;page++) {
       const count=rows.length; await loadRows(false); if(rows.length===count) break;
     }
-    if(!rows.some(row=>rowKey(row)===key)) {error="This entry is no longer saved on this device.";return;}
+    if(!rows.some(matches)) {error="This entry is no longer saved on this device.";return;}
     expanded=key;
     await tick();
     document.getElementById(`entry-${key}`)?.scrollIntoView({block:"center"});
+  }
+
+  let notificationTarget: QuestionTarget | null = null;
+  function openNotificationQuestion(target: QuestionTarget) {
+    notificationTarget = target;
+    screen = "feed";
+    tab = "all";
+    tryOpenNotificationQuestion();
+  }
+  function tryOpenNotificationQuestion() {
+    const target = notificationTarget;
+    if (!target) return;
+    const writer = view.writers.find(w => w.id === target.writer);
+    const row = rows.find(r => r.writer === target.writer && (r.entry.choices ?? r.entry.rply)?.question?.id === target.question);
+    if (!row && (!writer?.log || writer.last_id < target.entry)) return;
+    notificationTarget = null;
+    void openEntry({ writer: target.writer, log: row?.log ?? writer!.log!, id: row?.entry.id ?? target.entry, question: target.question })
+      .catch(e => { error = String(e); });
   }
 
   type FeedItem = { key: string; writer: Writer; log: string; entry: Entry; question?: Question };
@@ -205,7 +227,10 @@
     void copy(JSON.stringify({writer:item.writer.id,log:item.log,entry:item.entry}),`${item.key}:signed`);
   }
   async function toggleWriter(writer: Writer) {
-    try { view = await invoke<View>("set_writer_enabled", { writerId: writer.id, enabled: !writer.enabled }); }
+    try {
+      view = await invoke<View>("set_writer_enabled", { writerId: writer.id, enabled: !writer.enabled });
+      if (pushData) await copyNotificationSnapshot(invoke, true);
+    }
     catch (e) { error = String(e); }
   }
   async function renameWriter(writer: Writer, event: Event) {
@@ -216,6 +241,7 @@
     savingNetwork = true; error = "";
     try {
       view = await invoke<View>("configure_network", { settings: { disabled: relayMode === "direct", urls: relayMode === "custom" ? relayUrls.split(/\s+/).filter(Boolean) : [] } });
+      if (pushData) await copyNotificationSnapshot(invoke, true);
     } catch (e) { error = String(e); }
     finally { savingNetwork = false; }
   }
@@ -331,12 +357,17 @@
   }
 
   async function syncPush(subscription: PushSubscriptionData | null) {
+    let actionsSaved = true;
+    try { await copyNotificationSnapshot(invoke, subscription !== null); }
+    catch { actionsSaved = false; }
     const writers = view.writers.filter((writer) => !writer.delivers_only);
     const results = await Promise.allSettled(writers.map(({id}) =>
       invoke("configure_push", {writerId: id, subscription})
     ));
     if (subscription && results.some((result) => result.status === "rejected")) {
       pushMessage = "Some machines did not save notifications. Start a writer that supports Web Push, then try again.";
+    } else if (subscription && !actionsSaved) {
+      pushMessage = "Notifications work, but this browser could not save settings for replies.";
     } else {
       pushMessage = "";
     }
@@ -399,6 +430,20 @@
 
   onMount(() => {
     let active = true;
+    const canPush = supportsPush();
+    let lastResolved = "";
+    const refreshResolved = (force = false) => {
+      if (!canPush) return;
+      const ids = view.writers.flatMap(w => w.questions.filter(q => stateOf(q) !== "pending").map(q => q.question.id));
+      const key = ids.join(",");
+      if (force || key !== lastResolved) {
+        lastResolved = key;
+        void clearResolvedNotifications(ids).catch(() => {});
+      }
+    };
+    const visible = () => { if (!document.hidden) refreshResolved(true); };
+    let stopNotifications: (() => void) | undefined;
+    document.addEventListener("visibilitychange", visible);
     const unlisten = listen<FeedEvent>((payload) => {
       if (payload.type === "platform_error") {
         platformError = payload.message;
@@ -423,6 +468,10 @@
         rows = merged(rows, payload.rows.map((r) => ({ writer: payload.writer_id, ...r })));
       }
       else status = payload.text;
+      if (payload.type === "view" || payload.type === "entries") {
+        refreshResolved();
+        tryOpenNotificationQuestion();
+      }
     });
     (async () => {
       try {
@@ -438,7 +487,9 @@
         if (!saved.writers.length) screen = "devices";
         await loadRows(true);
         view = await invoke<View>("resume");
-        if (supportsPush()) {
+        refreshResolved(true);
+        if (canPush) {
+          stopNotifications = startNotificationPage(invoke, openNotificationQuestion);
           void navigator.serviceWorker.ready.then(async ({ pushManager: manager }) => {
             try {
               const prepared = await createPushKeys();
@@ -448,6 +499,7 @@
               pushManager = manager;
               pushData = await restorePush(manager);
               if (pushData) await syncPush(pushData);
+              else await copyNotificationSnapshot(invoke, false);
             } catch (e) { pushMessage = String(e); }
             finally { pushBusy = false; }
           });
@@ -456,8 +508,14 @@
         navigator.storage?.persist?.().catch(() => {});
       } catch (e) { error = String(e); status = "Saved entries remain on this device."; }
     })();
-    const timer = setInterval(() => { now = Date.now(); }, 1000);
-    return () => { active = false; clearInterval(timer); unlisten.then((f) => f()); };
+    const timer = setInterval(() => { now = Date.now(); refreshResolved(); }, 1000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", visible);
+      stopNotifications?.();
+      unlisten.then((f) => f());
+    };
   });
 </script>
 

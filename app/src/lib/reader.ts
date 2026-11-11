@@ -23,13 +23,26 @@ async function load(): Promise<Reader> {
 function reader(): Promise<Reader> {
   loading ??= new Promise<Reader>((resolve, reject) => {
     if (!navigator.locks) { reject(new Error("Yappr needs a browser with Web Locks support.")); return; }
-    void navigator.locks.request("yappr.endpoint", { ifAvailable: true }, async (lock) => {
-      if (!lock) { reject(new Error("Yappr is already open in another tab. Close that tab, then reload.")); return; }
+    const locks = navigator.locks;
+    const controller = new AbortController();
+    const alreadyOpen = () => reject(new Error("Yappr is already open in another tab. Close that tab, then reload."));
+    const ownEndpoint = async () => {
       try {
         resolve(await load());
         // The browser releases this lock when the owning page closes.
         await new Promise<void>(() => {});
       } catch (error) { reject(error); }
+    };
+    void locks.request("yappr.endpoint", { ifAvailable: true }, async (lock) => {
+      if (lock) return ownEndpoint();
+      const { held } = await locks.query();
+      if (!held?.some((item) => item.name === "yappr.notification-reply")) return alreadyOpen();
+      // A notification may still be sending an answer when this page opens.
+      const timer = setTimeout(() => controller.abort(), 12000);
+      return locks.request("yappr.endpoint", { signal: controller.signal }, async () => {
+        clearTimeout(timer);
+        await ownEndpoint();
+      }).catch(alreadyOpen);
     }).catch(reject);
   });
   return loading;

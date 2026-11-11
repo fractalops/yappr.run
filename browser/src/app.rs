@@ -1300,6 +1300,32 @@ async fn call(
         #[cfg(target_family = "wasm")]
         "configure_push" => json(configure_push(app, state, args(value)?).await),
         #[cfg(target_family = "wasm")]
+        "notification_snapshot" => {
+            json(crate::notification::snapshot(&state.dir, book(&state).await?).map_err(err))
+        }
+        #[cfg(target_family = "wasm")]
+        "notification_reply" => {
+            use crate::notification::{self, Answer, ResultKind};
+            let answer: Answer = args(value)?;
+            let readers = book(&state).await?;
+            let Some(writer) = readers
+                .writers
+                .get(&answer.writer)
+                .filter(|writer| writer.enabled && !writer.delivers_only)
+            else {
+                return json(Ok(ResultKind::Closed));
+            };
+            let Ok(runtime) = runtime(&app, &state).await else {
+                return json(Ok(ResultKind::Retry));
+            };
+            json(Ok(notification::send(
+                &runtime.client,
+                &writer.ticket,
+                answer,
+            )
+            .await))
+        }
+        #[cfg(target_family = "wasm")]
         "remove_writer" => {
             let a: SelectArgs = args(value)?;
             json(remove_writer(state, a.writer_id.ok_or("Select a machine.")?).await)
