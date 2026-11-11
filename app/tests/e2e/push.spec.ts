@@ -74,3 +74,43 @@ test("the service worker shows a push and opens Yappr on click", async ({ page, 
     closed: true,
   });
 });
+
+test("declarative push keeps actions in Chrome and preserves the native fallback", async ({ page, context }) => {
+  await page.goto("./");
+  const worker = context.serviceWorkers()[0] ?? await context.waitForEvent("serviceworker");
+  await page.evaluate(() => navigator.serviceWorker.ready.then(() => true));
+  const result = await worker.evaluate(async () => {
+    const scope = globalThis as unknown as {
+      registration: ServiceWorkerRegistration;
+      dispatchEvent(event: Event): boolean;
+    };
+    const shown: { title: string; actions: string[]; tag?: string }[] = [];
+    scope.registration.showNotification = async (title, options) => {
+      shown.push({ title, actions: (options as NotificationOptions & { actions?: { action: string }[] } | undefined)?.actions?.map(choice => choice.action) ?? [], tag: options?.tag });
+    };
+    const question = "b".repeat(64);
+    const writer = "a".repeat(64);
+    const navigate = new URL(`?writer=${writer}&question=${question}&entry=12`, scope.registration.scope).href;
+    const message = {
+      web_push: 8030,
+      mutable: true,
+      notification: { title: "Deploy?", body: "Work Mac · build", navigate, tag: question },
+      title: "Deploy?", writer: "Work Mac · build", body: "", kind: "approval",
+      writer_id: writer, question_id: question, entry_id: 12,
+      choices: [{value:"approve", label:"Approve"}, {value:"reject", label:"Reject"}],
+    };
+    const dispatch = async (limit: number, fallback?: object) => {
+      Object.defineProperty(Notification, "maxActions", { configurable: true, value: limit });
+      const work: Promise<unknown>[] = [];
+      scope.dispatchEvent(Object.assign(new Event("push"), {
+        data: { json: () => message }, notification: fallback,
+        waitUntil: (pending: Promise<unknown>) => work.push(pending),
+      }));
+      await Promise.all(work);
+    };
+    await dispatch(2);
+    await dispatch(0, message.notification);
+    return shown;
+  });
+  expect(result).toEqual([{ title: "Deploy?", actions: ["approve", "reject"], tag: "b".repeat(64) }]);
+});

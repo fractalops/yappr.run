@@ -4,6 +4,7 @@ export type PushSubscriptionData = {
   auth: string;
   vapid_private: string;
   vapid_public: string;
+  app_url: string;
 };
 
 export type PushKeys = { publicKey: string; privateKey: string };
@@ -66,6 +67,7 @@ function subscriptionData(subscription: PushSubscription, saved: PushKeys): Push
     p256dh: base64url(new Uint8Array(p256dh)),
     vapid_private: saved.privateKey,
     vapid_public: saved.publicKey,
+    app_url: new URL("./", location.href).href,
   };
 }
 

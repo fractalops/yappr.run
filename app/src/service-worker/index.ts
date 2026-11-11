@@ -10,10 +10,12 @@ const scope = self.registration.scope;
 const pages = () => self.clients.matchAll({ type: "window", includeUncontrolled: true });
 
 self.addEventListener("push", (event) => {
+  const maxActions = (Notification as typeof Notification & { maxActions?: number }).maxActions ?? 0;
+  // Keep the browser's declarative notification and its URL if it cannot show buttons.
+  if (!maxActions && (event as PushEvent & { notification?: Notification }).notification) return;
   let message: unknown;
   try { message = event.data?.json(); }
   catch { return; }
-  const maxActions = (Notification as typeof Notification & { maxActions?: number }).maxActions ?? 0;
   const notice = notification(message, scope, maxActions);
   if (!notice) return;
   event.waitUntil((async () => {

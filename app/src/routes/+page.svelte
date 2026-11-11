@@ -9,7 +9,7 @@
   import { linkSegments, renderMarkdown } from "#lib/body.ts";
   import { createPushKeys, disablePush, enablePush, isWebPage, restorePush, rotatePush, supportsPush, type PushKeys, type PushSubscriptionData } from "#lib/push.ts";
 
-  type Entry = { id: number; time: string; source: string; kind: string; level?: string; subject?: string; title?: string; body: string;
+  type Entry = { id: number; time: string; source: string; sender?: string; kind: string; level?: string; subject?: string; title?: string; body: string;
     format?: string; data?: Record<string, unknown>; sig?: string; choices?: { type?: string; question?: { id: string } }; rply?: { type?: string; question?: { id: string } } };
   type Question = { question: { id: string; title: string; body: string; options: { value: string; label: string }[];
     responder: string; expires_at: string | null; approval: boolean }; status: string; decision: { value: string; responder: string } | null };
@@ -654,9 +654,9 @@
             aria-label={`${label}. ${isExpanded ? "Hide details" : "Show full text and details"}`} onkeydown={(event) => headKey(event, item.key)}>
             <div class="row-meta">
               <span class="row-labels">
-                {#if !selectedMachine && machines.length > 1}<span class="writer-label">{item.writer.name}</span>{/if}
+                {#if !entry.sender && !selectedMachine && machines.length > 1}<span class="writer-label">{item.writer.name}</span>{/if}
                 {#if level !== "info"}<span class="level"><span class="level-dot" aria-hidden="true"></span>{level}</span>{/if}
-                <span class="source">{entry.source}</span>
+                <span class="source">{entry.sender || entry.source}</span>
                 <span>{q ? (q.question.approval ? "approval" : "question") : kindOf(entry)} #{entry.id}</span>
                 {#if q && state !== "pending" && state !== "answered" && state !== "expired"}<span class="entry-state">{state}</span>{/if}
               </span>
