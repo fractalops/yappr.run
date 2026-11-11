@@ -33,13 +33,13 @@ test("shows every choice or none and gives each question its own tag", () => {
   const choices = [{ value: "approve", label: "Approve" }, { value: "reject", label: "Reject" }];
   const push = {
     writer: "Laptop · deploy", title: "Deploy?", body: "Ready.", entry_id: 12,
-    writer_id: "a".repeat(64), question_id: "b".repeat(64), kind: "approval", unlock: true,
+    writer_id: "a".repeat(64), question_id: "b".repeat(64), kind: "approval",
     choices,
   };
   const notice = notification(push, scope, 2);
   assert.deepEqual(notice?.options.actions, choices.map(({value, label}) => ({action: value, title: label})));
   assert.equal(notice?.options.body, "Laptop · deploy\nApproval: Approve or Reject\nReady.");
-  assert.equal(notice?.options.data?.unlock, true);
+  assert.equal(notice?.options.data?.unlock, false);
   assert.equal(notice?.options.tag, push.question_id);
   for (const limit of [0, 1]) assert.equal(notification(push, scope, limit)?.options.actions, undefined);
   const resolved = notification({ ...push, kind: "resolved", title: "Answered: Approve", choices: [] }, scope, 2);
@@ -47,6 +47,26 @@ test("shows every choice or none and gives each question its own tag", () => {
   assert.equal(resolved?.options.silent, true);
   assert.equal(resolved?.options.actions, undefined);
   assert.equal(notification({ ...push, expires_at: "2000-01-01T00:00:00Z" }, scope, 2)?.options.actions, undefined);
+});
+
+test("shows only Reject for an approval that opens the app", () => {
+  const reject = { value: "reject", label: "Reject" };
+  const push = {
+    web_push: 8030, mutable: true,
+    notification: { title: "Deploy?", navigate: scope },
+    writer: "Laptop · deploy", title: "Deploy?", body: "Ready.", entry_id: 12,
+    writer_id: "a".repeat(64), question_id: "b".repeat(64),
+    kind: "approval", unlock: true, choices: [reject],
+  };
+  const notice = notification(push, scope, 1);
+  assert.deepEqual(notice?.options.actions, [{ action: "reject", title: "Reject" }]);
+  assert.deepEqual(notice?.options.data?.choices, [reject]);
+  assert.equal(notice?.options.data?.unlock, true);
+  assert.equal(notice?.options.body, "Laptop · deploy\nTap the notification to approve.\nReady.");
+  assert.equal(notification(push, scope, 0)?.options.actions, undefined);
+  assert.deepEqual(notification({
+    ...push, choices: [{ value: "approve", label: "Approve" }, reject],
+  }, scope, 2)?.options.actions, notice?.options.actions);
 });
 
 test("passes the question to the open page or opens its URL", async () => {

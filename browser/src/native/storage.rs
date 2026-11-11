@@ -68,10 +68,14 @@ pub trait RelayStore: Sized {
 }
 impl RelayStore for RelaySettings {
     fn load(dir: &Dir) -> Result<Self> {
-        Self::load(&dir.path)
+        let settings: Self = read(dir, "yappr.network")?;
+        settings.validate()?;
+        Ok(settings)
     }
     fn save(&self, dir: &Dir) -> Result<()> {
-        self.save(&dir.path)
+        self.validate()?;
+        let _lock = disk::lock(&dir.path, "network.lock")?;
+        write(dir, "yappr.network", self)
     }
 }
 
