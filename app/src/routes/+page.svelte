@@ -355,7 +355,7 @@
         pushData = await enablePush(pushManager, pushKeys);
       }
       await syncPush(pushData);
-    } catch (e) { pushMessage = String(e); }
+    } catch (e) { pushMessage = e instanceof Error ? e.message : String(e); }
     finally { pushBusy = false; }
   }
 
@@ -516,7 +516,8 @@
     <details class="panel device-panel"><summary>Advanced settings</summary>
       <PlatformSettings />
       {#if pushManager}
-        <label><input type="checkbox" checked={!!pushData} disabled={pushBusy || view.pairing} onchange={togglePush} />
+        <label class="push-setting"><input type="checkbox" checked={!!pushData} disabled={pushBusy || view.pairing}
+          onchange={(event) => { event.currentTarget.checked = !!pushData; void togglePush(); }} />
           Notify me when this page is closed
         </label>
         {#if pushMessage}<p class="hint" role="status">{pushMessage}</p>{/if}
@@ -747,6 +748,8 @@
   summary { cursor: pointer; color: var(--muted); min-height: 44px; padding: 12px 0; }
   label { display: block; color: var(--muted); font-size: 12px; margin: 14px 0 6px; }
   input, textarea, select { width: 100%; background: #121418; border: 1px solid #3a3f49; border-radius: 7px; padding: 10px; color: inherit; font-size: 16px; }
+  .push-setting { display: flex; align-items: center; gap: 9px; min-height: 44px; margin: 0; }
+  .push-setting input { flex: none; width: 16px; height: 16px; margin: 0; padding: 0; }
   textarea { resize: vertical; overflow-wrap: anywhere; }
   .connect-options { display: grid; gap: 12px; margin-top: 18px; }
   .choice { display: flex; align-items: center; gap: 16px; width: 100%; min-height: 56px; padding: 0 16px; border: 1px solid var(--border); border-radius: 8px; background: #15171b; color: #e0e3e8; font-size: 15px; text-align: left; }

@@ -23,6 +23,18 @@ test("the notification toggle subscribes from the click", async ({ page }) => {
   expect(JSON.parse(gesture ?? "{}")).toEqual({ active: true, visible: true, hasKey: true });
 });
 
+test("the notification toggle stays off when the browser refuses push", async ({ page }) => {
+  await page.addInitScript(() => {
+    PushManager.prototype.subscribe = () => Promise.reject(new DOMException("No permission", "NotAllowedError"));
+  });
+  await page.goto("./");
+  await page.getByText("Advanced settings", { exact: true }).click();
+  const toggle = page.getByRole("checkbox", { name: "Notify me when this page is closed" });
+  await toggle.click();
+  await expect(page.getByText("Check the notification permissions for Yappr, then try again.")).toBeVisible();
+  await expect(toggle).not.toBeChecked();
+});
+
 test("the service worker shows a push and closes the notification on click", async ({ page, context }) => {
   await context.grantPermissions(["notifications"]);
   await page.goto("./");

@@ -81,8 +81,8 @@ export async function enablePush(manager: PushManager, saved: PushKeys) {
   try {
     subscription = await subscribe(manager, saved);
   } catch (error) {
-    if (Notification.permission === "denied") {
-      throw new Error("Allow notifications in the browser settings.");
+    if (Notification.permission === "denied" || (error instanceof DOMException && error.name === "NotAllowedError")) {
+      throw new Error("Check the notification permissions for Yappr, then try again.");
     }
     throw error;
   }
