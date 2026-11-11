@@ -946,16 +946,16 @@ fn preview_invitation(invitation: String) -> Result<PairPreview, String> {
         expires_at: invitation.expires_at.to_string(),
     })
 }
-async fn pair_device(
-    app: AppHandle,
-    state: Arc<AppState>,
-    invitation: String,
-    name: String,
-) -> Result<View, String> {
+async fn pair_device(app: AppHandle, state: Arc<AppState>, args: PairArgs) -> Result<View, String> {
     let _guard = state.lifecycle.lock().await;
-    let invitation = Invitation::decode(&invitation).map_err(err)?;
-    readers::validate_name(&name).map_err(err)?;
-    let pair = PendingPair { invitation, name };
+    let invitation = Invitation::decode(&args.invitation).map_err(err)?;
+    readers::validate_name(&args.name).map_err(err)?;
+    let pair = PendingPair {
+        invitation,
+        name: args.name,
+        #[cfg(target_family = "wasm")]
+        push: args.push,
+    };
     abort(state.pair_task.lock().await.take()).await;
     update(&state, |book| {
         book.invitation = Some(pair.clone());
@@ -1003,6 +1003,10 @@ async fn start_pair(app: AppHandle, state: Arc<AppState>, pair: PendingPair) {
                             token: invitation.token.clone(),
                             name: pair.name.clone(),
                             ticket: Some(own.to_string()),
+                            #[cfg(target_family = "wasm")]
+                            push: pair.push.clone(),
+                            #[cfg(not(target_family = "wasm"))]
+                            push: None,
                         },
                     )
                     .await;
@@ -1168,6 +1172,56 @@ struct InvitationArgs {
 struct PairArgs {
     invitation: String,
     name: String,
+    #[cfg(target_family = "wasm")]
+    push: Option<yappr::push::Subscription>,
+}
+#[cfg(target_family = "wasm")]
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PushArgs {
+    writer_id: String,
+    subscription: Option<yappr::push::Subscription>,
+}
+
+#[cfg(target_family = "wasm")]
+async fn configure_push(
+    app: AppHandle,
+    state: Arc<AppState>,
+    args: PushArgs,
+) -> Result<(), String> {
+    let book = book(&state).await?;
+    let writer = book
+        .writers
+        .get(&args.writer_id)
+        .ok_or("The machine does not exist.")?;
+    let ticket: EndpointTicket = writer.ticket.parse().map_err(err)?;
+    runtime(&app, &state)
+        .await?
+        .client
+        .set_push(ticket.endpoint_addr().clone(), args.subscription)
+        .await
+        .map_err(err)
+}
+
+#[cfg(target_family = "wasm")]
+async fn remove_writer(state: Arc<AppState>, id: String) -> Result<View, String> {
+    let _guard = state.lifecycle.lock().await;
+    update(&state, |book| {
+        book.writers
+            .remove(&id)
+            .ok_or("The machine does not exist.")?;
+        if book.selected.as_ref() == Some(&id) {
+            book.selected = None;
+        }
+        Ok(())
+    })
+    .await?;
+    abort(state.tasks.lock().await.remove(&id)).await;
+    if let Some(conn) = state.delivering.lock().await.remove(&id) {
+        conn.close(yappr::proto::DENIED_CODE.into(), b"removed");
+    }
+    state.health.lock().await.remove(&id);
+    view(&state).await
 }
 #[derive(Deserialize)]
 struct NetworkArgs {
@@ -1242,9 +1296,13 @@ async fn call(
             let a: InvitationArgs = args(value)?;
             json(preview_invitation(a.invitation))
         }
-        "pair_device" => {
-            let a: PairArgs = args(value)?;
-            json(pair_device(app, state, a.invitation, a.name).await)
+        "pair_device" => json(pair_device(app, state, args(value)?).await),
+        #[cfg(target_family = "wasm")]
+        "configure_push" => json(configure_push(app, state, args(value)?).await),
+        #[cfg(target_family = "wasm")]
+        "remove_writer" => {
+            let a: SelectArgs = args(value)?;
+            json(remove_writer(state, a.writer_id.ok_or("Select a machine.")?).await)
         }
         "stop" => json(stop(app, state).await),
         "configure_network" => {

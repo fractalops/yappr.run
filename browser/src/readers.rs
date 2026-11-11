@@ -53,6 +53,9 @@ pub struct OldLog {
 pub struct PendingPair {
     pub invitation: Invitation,
     pub name: String,
+    #[cfg(target_family = "wasm")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push: Option<yappr::push::Subscription>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

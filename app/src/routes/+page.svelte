@@ -5,6 +5,7 @@
   import { onMount, tick } from "svelte";
   import { resolve } from "$app/paths";
   import { linkSegments, renderMarkdown } from "#lib/body.ts";
+  import { createPushKeys, disablePush, enablePush, isWebPage, restorePush, rotatePush, supportsPush, type PushKeys, type PushSubscriptionData } from "#lib/push.ts";
 
   type Entry = { id: number; time: string; source: string; kind: string; level?: string; subject?: string; title?: string; body: string;
     format?: string; data?: Record<string, unknown>; sig?: string; choices?: { type?: string; question?: { id: string } }; rply?: { type?: string; question?: { id: string } } };
@@ -35,6 +36,11 @@
   let relayMode = $state("default");
   let relayUrls = $state("");
   let savingNetwork = $state(false);
+  let pushManager = $state.raw<PushManager | null>(null);
+  let pushKeys: PushKeys | null = null;
+  let pushData = $state.raw<PushSubscriptionData | null>(null);
+  let pushBusy = $state(false);
+  let pushMessage = $state("");
   let machineName = $state("");
   let platformError = $state("");
   let status = $state("Reading saved entries…");
@@ -321,7 +327,49 @@
       return;
     }
     pairWriter=preview.name;pairStep='sending';
-    try{view=await invoke<View>('pair_device',{invitation:code,name});pairing=true;preview=null;}catch(e){error=String(e);pairStep='idle';}
+    try{view=await invoke<View>('pair_device',{invitation:code,name,push:pushData});pairing=true;preview=null;}catch(e){error=String(e);pairStep='idle';}
+  }
+
+  async function syncPush(subscription: PushSubscriptionData | null) {
+    const writers = view.writers.filter((writer) => !writer.delivers_only);
+    const results = await Promise.allSettled(writers.map(({id}) =>
+      invoke("configure_push", {writerId: id, subscription})
+    ));
+    if (subscription && results.some((result) => result.status === "rejected")) {
+      pushMessage = "Some machines did not save notifications. Start a writer that supports Web Push, then try again.";
+    } else {
+      pushMessage = "";
+    }
+  }
+
+  async function togglePush() {
+    if (!pushManager || !pushKeys || pushBusy) return;
+    pushBusy = true;
+    pushMessage = "";
+    try {
+      if (pushData) {
+        await disablePush(pushManager);
+        pushData = null;
+        pushKeys = await createPushKeys();
+      } else {
+        pushData = await enablePush(pushManager, pushKeys);
+      }
+      await syncPush(pushData);
+    } catch (e) { pushMessage = e instanceof Error ? e.message : String(e); }
+    finally { pushBusy = false; }
+  }
+
+  async function removeMachine(writer: Writer) {
+    if (pushBusy || view.pairing || !window.confirm(`Remove ${writer.name} from this device?`)) return;
+    pushBusy = true;
+    try {
+      if (pushManager && pushData) pushData = await rotatePush(pushManager);
+      view = await invoke<View>("remove_writer", {writerId: writer.id});
+      if (selectedMachine === writer.id) selectedMachine = "";
+      rows = rows.filter((row) => row.writer !== writer.id);
+      if (pushData) await syncPush(pushData);
+    } catch (e) { error = String(e); }
+    finally { pushBusy = false; }
   }
   function startChoice(writerId: string, id: string, value: string, label: string) {
     const key = `${writerId}:${id}`;
@@ -363,6 +411,7 @@
           // Show the approval for a moment before the feed replaces it.
           pairStep = "approved"; followSuccess=pairWriter;
           setTimeout(() => { pairing = false; pairStep = "idle"; }, APPROVED_MS);
+          if (pushData) void syncPush(pushData);
         }
       } else if (payload.type === "pair_failed") { pairing = false; pairStep = "idle"; screen="devices"; error = payload.message; }
       else if (payload.type === "pair_state") { if (pairStep !== "approved") pairStep = payload.state; }
@@ -389,6 +438,20 @@
         if (!saved.writers.length) screen = "devices";
         await loadRows(true);
         view = await invoke<View>("resume");
+        if (supportsPush()) {
+          void navigator.serviceWorker.ready.then(async ({ pushManager: manager }) => {
+            try {
+              const prepared = await createPushKeys();
+              if (!active) return;
+              pushKeys = prepared;
+              pushBusy = true;
+              pushManager = manager;
+              pushData = await restorePush(manager);
+              if (pushData) await syncPush(pushData);
+            } catch (e) { pushMessage = String(e); }
+            finally { pushBusy = false; }
+          });
+        }
         // Ask the browser to keep the saved entries when it needs space.
         navigator.storage?.persist?.().catch(() => {});
       } catch (e) { error = String(e); status = "Saved entries remain on this device."; }
@@ -452,6 +515,16 @@
     {#if hasConnections || hasHistory}<button class="view-feed" onclick={()=>screen='feed'}>View feed <span aria-hidden="true">→</span></button>{/if}
     <details class="panel device-panel"><summary>Advanced settings</summary>
       <PlatformSettings />
+      {#if pushManager}
+        <label class="push-setting"><input type="checkbox" checked={!!pushData} disabled={pushBusy || view.pairing}
+          onchange={(event) => { event.currentTarget.checked = !!pushData; void togglePush(); }} />
+          Notify me when this page is closed
+        </label>
+        {#if pushMessage}<p class="hint" role="status">{pushMessage}</p>{/if}
+        {#if pushData && pushMessage}
+          <button class="quiet" disabled={pushBusy} onclick={() => syncPush(pushData)}>Send settings again</button>
+        {/if}
+      {/if}
       <details><summary>This device</summary>
       <code class="identity">{view.device_id || "Reading identity…"}</code>
       <button class="quiet" onclick={copyId}>{copied ? "Copied" : "Copy device ID"}</button></details>
@@ -467,6 +540,9 @@
             {#if writer.health.error}<p class="hint">{writer.health.error}</p>{/if}
             {#if writer.health.retry_in_ms}<p class="hint">Retry delay: {writer.health.retry_in_ms / 1000}s</p>{/if}
             <code class="identity">{writer.id}</code>
+            {#if isWebPage()}
+              <button class="quiet" disabled={pushBusy || view.pairing} onclick={() => removeMachine(writer)}>Remove {writer.name}</button>
+            {/if}
           </div>
         {/each}
       </details>
@@ -672,6 +748,8 @@
   summary { cursor: pointer; color: var(--muted); min-height: 44px; padding: 12px 0; }
   label { display: block; color: var(--muted); font-size: 12px; margin: 14px 0 6px; }
   input, textarea, select { width: 100%; background: #121418; border: 1px solid #3a3f49; border-radius: 7px; padding: 10px; color: inherit; font-size: 16px; }
+  .push-setting { display: flex; align-items: center; gap: 9px; min-height: 44px; margin: 0; }
+  .push-setting input { flex: none; width: 16px; height: 16px; margin: 0; padding: 0; }
   textarea { resize: vertical; overflow-wrap: anywhere; }
   .connect-options { display: grid; gap: 12px; margin-top: 18px; }
   .choice { display: flex; align-items: center; gap: 16px; width: 100%; min-height: 56px; padding: 0 16px; border: 1px solid var(--border); border-radius: 8px; background: #15171b; color: #e0e3e8; font-size: 15px; text-align: left; }
