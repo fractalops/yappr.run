@@ -31,16 +31,18 @@ export function notification(data: unknown, scope: string, maxActions = 0) {
   if (typeof message.writer !== "string" || typeof message.title !== "string"
     || typeof message.body !== "string" || !Number.isSafeInteger(message.entry_id)) return null;
   const target = { writer: message.writer_id, question: message.question_id, entry: message.entry_id };
-  const choices = Array.isArray(message.choices) && message.choices.every(validChoice) ? message.choices : [];
+  const unlock = message.kind === "approval" && message.unlock === true;
+  const allChoices = Array.isArray(message.choices) && message.choices.every(validChoice) ? message.choices : [];
+  const choices = unlock ? allChoices.filter(choice => choice.value === "reject") : allChoices;
   const resolved = message.kind === "resolved";
   const question = validQuestionTarget(target) ? {
-    target, choices, unlock: message.kind === "approval" && message.unlock === true,
+    target, choices, unlock,
     expires: message.expires_at ? Date.parse(message.expires_at) : null,
   } : null;
-  const label = choices.length ? (message.kind === "approval" ? "Approval: " : "Question: ")
+  const label = unlock ? "Tap the notification to approve." : choices.length ? (message.kind === "approval" ? "Approval: " : "Question: ")
     + choices.map(c => c.label).join(" or ") : "";
   const actions = question && !resolved && (question.expires === null || question.expires > Date.now())
-    && choices.length >= 2 && choices.length <= maxActions
+    && choices.length >= (unlock ? 1 : 2) && choices.length <= maxActions
     ? choices.map(({value, label}) => ({action: value, title: label})) : [];
   return {
     title: message.title || "Yappr",

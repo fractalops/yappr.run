@@ -276,7 +276,7 @@ test("notification clicks use the page or the worker endpoint and save answers o
         const notification = {
           close() {},
           data: { target: { writer: writerId, question, entry }, choices: [
-            {value: "approve", label: "Approve"}, {value: "reject", label: "Reject"},
+            ...(unlock ? [] : [{value: "approve", label: "Approve"}]), {value: "reject", label: "Reject"},
           ], unlock, expires: null },
         };
         scope.dispatchEvent(Object.assign(new Event("notificationclick"), {
@@ -303,7 +303,7 @@ test("notification clicks use the page or the worker endpoint and save answers o
   await page.getByRole("tab", { name: "Feed", exact: true }).click();
   await expect(page.getByRole("button", { name: "Open this question. Show full text and details" })).toBeVisible();
   const rowId = await page.getByRole("button", { name: "Open this question. Show full text and details" }).getAttribute("aria-controls");
-  expect(await click(unlock, "approve", true, false, Number(rowId?.split(":").at(-1)))).toEqual([]);
+  expect(await click(unlock, "", true, false, Number(rowId?.split(":").at(-1)))).toEqual([]);
   await expect(page.getByRole("button", { name: "Open this question. Hide details" })).toBeVisible();
   expect(await click(unlock, "reject", true)).toEqual([]);
   await expect((await cli("wait", unlock).catch(error => error)).stdout.trim()).toBe("reject");

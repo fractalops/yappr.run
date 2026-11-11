@@ -4674,8 +4674,8 @@ dependencies = [
 
 [[package]]
 name = "yappr"
-version = "0.1.8-rc.3"
-source = "git+https://github.com/fractalops/yappr?rev=5af1c063c4e5f96acbb8d3cb401b1fc24d31bdcd#5af1c063c4e5f96acbb8d3cb401b1fc24d31bdcd"
+version = "0.1.8-rc.4"
+source = "git+https://github.com/fractalops/yappr?rev=1ae83e0c099334b7a87e3d400fc17a769f4ae01b#1ae83e0c099334b7a87e3d400fc17a769f4ae01b"
 dependencies = [
  "anyhow",
  "base64ct",
