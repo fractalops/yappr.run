@@ -36,6 +36,16 @@ echo "Backup complete" | yappr post --source backup
 
 On your phone, select **Feed** to see **Backup complete**.
 
+## Get notifications when Yappr is closed
+
+Use a writer that supports Web Push. In **Setup**, open **Advanced settings**.
+Select **Notify me when this page is closed** and allow browser notifications.
+Yappr sends a notification for a question, a warning, or an alert.
+Select the notification to open Yappr. Answer questions in the app.
+
+On an iPhone with iOS 16.4 or later, add Yappr to your Home Screen first.
+Open it from there to pair your computer and allow notifications.
+
 ## Answer a request
 
 On your computer, ask for approval:
@@ -45,10 +55,10 @@ yappr approve phone "Continue the backup?"
 ```
 
 Select a choice on your phone. Use **Undo** within five seconds if needed.
-The answer stays queued on this device until the computer confirms it.
+The answer stays queued on this device until the computer saves it.
 **Open** shows questions waiting for your answer.
 
-<img src="docs/assets/questions-and-approvals.gif" alt="Yappr offers three choices, undoes a selection, and confirms an answer and an approval" width="440" />
+<img src="docs/assets/questions-and-approvals.gif" alt="Yappr offers three choices, undoes a selection, and shows an answer and an approval" width="440" />
 
 ## More
 
