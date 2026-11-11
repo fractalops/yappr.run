@@ -28,3 +28,37 @@ test("focuses the open app or opens the app within the worker scope", async () =
   await openYappr(scope, [page("https://example.test/elsewhere/")], open);
   assert.deepEqual(calls, ["open " + scope]);
 });
+
+test("shows every choice or none and gives each question its own tag", () => {
+  const choices = [{ value: "approve", label: "Approve" }, { value: "reject", label: "Reject" }];
+  const push = {
+    writer: "Laptop · deploy", title: "Deploy?", body: "Ready.", entry_id: 12,
+    writer_id: "a".repeat(64), question_id: "b".repeat(64), kind: "approval", unlock: true,
+    choices,
+  };
+  const notice = notification(push, scope, 2);
+  assert.deepEqual(notice?.options.actions, choices.map(({value, label}) => ({action: value, title: label})));
+  assert.equal(notice?.options.body, "Laptop · deploy\nApproval: Approve or Reject\nReady.");
+  assert.equal(notice?.options.data?.unlock, true);
+  assert.equal(notice?.options.tag, push.question_id);
+  for (const limit of [0, 1]) assert.equal(notification(push, scope, limit)?.options.actions, undefined);
+  const resolved = notification({ ...push, kind: "resolved", title: "Answered: Approve", choices: [] }, scope, 2);
+  assert.equal(resolved?.options.tag, notice?.options.tag);
+  assert.equal(resolved?.options.silent, true);
+  assert.equal(resolved?.options.actions, undefined);
+  assert.equal(notification({ ...push, expires_at: "2000-01-01T00:00:00Z" }, scope, 2)?.options.actions, undefined);
+});
+
+test("passes the question to the open page or opens its URL", async () => {
+  const target = { writer: "a".repeat(64), question: "b".repeat(64), entry: 3 };
+  const sent: unknown[] = [];
+  const opened: string[] = [];
+  const open = async (url: string) => opened.push(url);
+  await openYappr(scope, [{ url: scope, focus: async () => {}, postMessage: (data) => sent.push(data) }], open, target);
+  assert.deepEqual(sent, [{kind: "open-question", target}]);
+  assert.deepEqual(opened, []);
+  await openYappr(scope, [], open, target);
+  assert.deepEqual(Object.fromEntries(new URL(opened[0]).searchParams), {
+    writer: target.writer, question: target.question, entry: "3",
+  });
+});

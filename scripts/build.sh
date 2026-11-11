@@ -19,6 +19,8 @@ fi
 cargo build --locked -p yappr-browser --target wasm32-unknown-unknown --release
 mkdir -p app/static/wasm
 "$bindgen" target/wasm32-unknown-unknown/release/yappr_browser.wasm --target web --out-dir app/static/wasm --out-name yappr_browser
+cp app/static/wasm/yappr_browser.js app/src/service-worker/reader.generated.js
+cp -R app/static/wasm/snippets app/src/service-worker/
 pnpm --dir app build
 mkdir -p pages
 cp -R app/build/. pages/

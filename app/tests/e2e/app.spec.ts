@@ -226,3 +226,97 @@ test("entries in the first IndexedDB layout stay after the upgrade", async ({ pa
   await page.getByRole("tab", { name: "Feed", exact: true }).click();
   await expect(page.getByRole("button", { name: "Saved before logs. Show full text and details", exact: true })).toBeVisible();
 });
+
+test("notification clicks use the page or the worker endpoint and save answers on failure", async ({ page, context }) => {
+  await context.addInitScript(() => {
+    Object.defineProperty(Notification, "maxActions", { configurable: true, value: 2 });
+    PushManager.prototype.subscribe = () => Promise.resolve({
+      endpoint: "https://fcm.googleapis.com/test",
+      getKey: (kind: PushEncryptionKeyName) => new ArrayBuffer(kind === "auth" ? 16 : 65),
+    } as PushSubscription);
+  });
+  await pair(page);
+  await page.getByRole("tab", { name: "Setup", exact: true }).click();
+  await page.getByText("Advanced settings", { exact: true }).click();
+  await page.getByRole("checkbox", { name: "Notify me when this page is closed" }).click();
+  await page.evaluate(() => navigator.serviceWorker.ready.then(() => true));
+  const worker = context.serviceWorkers()[0] ?? await context.waitForEvent("serviceworker");
+  const stored = () => worker.evaluate(async () => {
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("yappr.notification-actions", 1);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const tx = db.transaction(["settings", "answers"]);
+    const get = <T,>(req: IDBRequest<T>) => new Promise<T>((resolve, reject) => {
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    const [snapshot, answers] = await Promise.all([
+      get(tx.objectStore("settings").get("writer")),
+      get(tx.objectStore("answers").getAll()),
+    ]);
+    db.close();
+    return { fields: Object.keys(snapshot ?? {}).sort(), writers: Object.keys(snapshot?.tickets ?? {}), answers };
+  });
+  const writerId = (await cli("id")).stdout.trim();
+  await expect.poll(async () => (await stored()).writers).toEqual([writerId]);
+  expect((await stored()).fields).toEqual(["relays", "secret", "tickets"]);
+
+  async function click(question: string, action: string, unlock = false, blocked = false, entry = 1) {
+    return worker.evaluate(async ({ writerId, question, action, unlock, blocked, entry }) => {
+      const scope = globalThis as unknown as { registration: ServiceWorkerRegistration; dispatchEvent(event: Event): boolean };
+      const shown: string[] = [];
+      // A synthetic click cannot focus a window. Keep the real message hand-off.
+      const windowClient = (globalThis as unknown as { WindowClient: { prototype: { focus(): Promise<unknown> } } }).WindowClient;
+      if (windowClient) windowClient.prototype.focus = async function () { return this; };
+      scope.registration.showNotification = async (title) => { shown.push(title); };
+      const dispatch = async () => {
+        const work: Promise<unknown>[] = [];
+        const notification = {
+          close() {},
+          data: { target: { writer: writerId, question, entry }, choices: [
+            {value: "approve", label: "Approve"}, {value: "reject", label: "Reject"},
+          ], unlock, expires: null },
+        };
+        scope.dispatchEvent(Object.assign(new Event("notificationclick"), {
+          notification, action, waitUntil: (task: Promise<unknown>) => work.push(task),
+        }));
+        await Promise.all(work);
+      };
+      if (blocked) await navigator.locks.request("yappr.endpoint", dispatch);
+      else await dispatch();
+      return shown;
+    }, { writerId, question, action, unlock, blocked, entry });
+  }
+  async function approve(title: string, ...flags: string[]) {
+    const { stdout } = await cli("approve", "my-browser", title, "--timeout", "90s", "--no-wait", ...flags);
+    return stdout.trim();
+  }
+
+  const open = await approve("Through the open page");
+  expect(await click(open, "approve")).toEqual([]);
+  expect((await cli("wait", open)).stdout.trim()).toBe("approve");
+
+  const unlock = await approve("Open this question", "--unlock");
+  await expect(page.getByRole("tab", { name: "Feed", exact: true })).toBeVisible();
+  await page.getByRole("tab", { name: "Feed", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Open this question. Show full text and details" })).toBeVisible();
+  const rowId = await page.getByRole("button", { name: "Open this question. Show full text and details" }).getAttribute("aria-controls");
+  expect(await click(unlock, "approve", true, false, Number(rowId?.split(":").at(-1)))).toEqual([]);
+  await expect(page.getByRole("button", { name: "Open this question. Hide details" })).toBeVisible();
+  expect(await click(unlock, "reject", true)).toEqual([]);
+  await expect((await cli("wait", unlock).catch(error => error)).stdout.trim()).toBe("reject");
+
+  const closed = await approve("Through the worker");
+  const retry = await approve("Retry from outbox");
+  await page.close();
+  expect(await click(closed, "approve")).toEqual([]);
+  expect((await cli("wait", closed)).stdout.trim()).toBe("approve");
+  expect(await click(retry, "approve", false, true)).toEqual(["Answer not sent yet"]);
+  expect((await stored()).answers).toHaveLength(1);
+  const reopened = await context.newPage();
+  await reopened.goto("./");
+  expect((await cli("wait", retry)).stdout.trim()).toBe("approve");
+  await expect.poll(async () => (await stored()).answers).toEqual([]);
+});

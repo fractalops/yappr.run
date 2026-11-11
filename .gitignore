@@ -9,3 +9,5 @@
 .DS_Store
 /app/test-results/
 /app/playwright-report/
+/app/src/service-worker/reader.generated.js
+/app/src/service-worker/snippets/
