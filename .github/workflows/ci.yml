@@ -56,7 +56,7 @@ jobs:
       - name: cargo test
         run: cargo test --locked --workspace --target x86_64-unknown-linux-gnu
 
-  # Build the page and pair it with the CLI in Chromium. The tests use the
+  # Build the page and pair it with the CLI in Chrome. The tests use the
   # public relays.
   browser:
     runs-on: ubuntu-latest
@@ -90,10 +90,13 @@ jobs:
       - run: pnpm --dir app check
       - run: pnpm --dir app test
       - run: ./scripts/build.sh
-      - name: Install Chromium
-        run: pnpm --dir app exec playwright install --with-deps chromium
       - name: Browser tests
-        run: pnpm --dir app test:e2e --reporter=list,html
+        run: |
+          export PLAYWRIGHT_CHROMIUM_EXECUTABLE="$(command -v google-chrome)"
+          test -x "$PLAYWRIGHT_CHROMIUM_EXECUTABLE"
+          "$PLAYWRIGHT_CHROMIUM_EXECUTABLE" --version
+          yappr --version
+          pnpm --dir app test:e2e --reporter=list,html
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:
